@@ -147,6 +147,8 @@ The commands change the state as follows.
 
 A command in a state that does not allow it fails with a `conflict` error and changes nothing. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
 
+When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. With the `print` backend, this happens after each prompt. `clb` finds these processes by the `CLB_PROC_TOKEN` variable that it adds to the agent's environment, so a process that starts with a cleared environment keeps running.
+
 If the daemon stops while runs are active, it marks those runs `failed` when it starts again.
 
 ## Commands
@@ -207,6 +209,7 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 
 - Empty fields such as `summary`, `error`, and `model` are left out.
 - `summary` is the agent's reply text from its most recent turn. When tool calls split the reply into several blocks of text, `summary` joins the blocks with a newline.
+- `error` says why the run failed. When the agent process exited, it includes the first 512 bytes of the agent's stderr and how many bytes it left out. The webhook payload has the same text.
 - `queuedPrompts` counts prompts that the agent has not received yet.
 - `pendingPermission` is the oldest unanswered permission request. `toolCall` is the agent's description of the tool call, as sent by the Cursor CLI. For a shell command the Cursor CLI puts the command in `title` and the reason it asks, such as `Not in allowlist: npm`, in `content`.
 - `options` lists the choices the agent offered, as it sent them. `clb approve` picks the option whose `kind` is `allow_once`, and `clb deny` the one whose `kind` is `reject_once`. The `permission_requested` event carries the same `options`.
@@ -348,6 +351,7 @@ Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered thes
 
 - Denying a permission request from the real CLI.
 - The `print` backend run through `clb` with `trustWorktree`.
+- Ending the commands that the agent ran in the background. If the Cursor CLI starts commands with a cleared environment, they keep running after the agent process ends.
 
 Other gaps:
 
