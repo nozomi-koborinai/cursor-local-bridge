@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
@@ -93,6 +94,10 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 // Recover fails every run that was active when the previous daemon stopped,
 // so that its webhook fires, and rewrites every run's NDJSON log from the
 // store. Call it before Serve. Calling it again changes nothing.
+//
+// A run's agent runs in its own process group, so it and its commands can
+// outlive a daemon crash. Recover ends the processes working in the
+// worktree of each run it fails.
 func (d *Daemon) Recover(ctx context.Context) error {
 	runs, err := d.store.ListRuns(ctx)
 	if err != nil {
@@ -100,6 +105,7 @@ func (d *Daemon) Recover(ctx context.Context) error {
 	}
 	for _, r := range runs {
 		if r.Lifecycle.State.Active() {
+			proc.EndUnder(r.Worktree)
 			restarted := lifecycle.BackendFailed{Err: "daemon restarted while the run was active"}
 			if _, err := d.command(ctx, r.ID, restarted); err != nil {
 				return fmt.Errorf("fail run %s: %w", r.ID, err)
