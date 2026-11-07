@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -134,23 +135,52 @@ func (p *Process) Stop() {
 
 // EndUnder ends this user's processes, other than this one, whose working
 // directory is dir or below it, the way Stop ends the descendants that left
-// the group. It does nothing unless dir is absolute and not the root.
+// the group. It does nothing when dir is relative, names a symlink, or
+// resolves to the root. A directory that has already been removed is still
+// swept under the path the kernel reports for it.
 func EndUnder(dir string) {
-	if !filepath.IsAbs(dir) {
-		return
-	}
-	// Kernels report working directories with symlinks resolved.
-	root, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		root = filepath.Clean(dir)
-	}
-	if root == "/" {
+	root, ok := sweepRoot(dir)
+	if !ok {
 		return
 	}
 	reap(func(pid int) bool {
 		cwd, err := cwdOf(pid)
-		return err == nil && (cwd == root || strings.HasPrefix(cwd, root+"/"))
+		return err == nil && cwdUnder(cwd, root)
 	})
+}
+
+// sweepRoot is the directory EndUnder matches. Symlinks in the parent are
+// resolved, because kernels report those paths resolved, and the leaf name is
+// joined back on, so a removed directory still matches. A symlink at dir
+// itself is refused: matching that target would end processes outside the
+// worktree when the leaf is replaced by one.
+func sweepRoot(dir string) (string, bool) {
+	dir = filepath.Clean(dir)
+	if !filepath.IsAbs(dir) {
+		return "", false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(dir))
+	if err != nil {
+		return "", false
+	}
+	root := filepath.Join(parent, filepath.Base(dir))
+	if root == "/" {
+		return "", false
+	}
+	return root, true
+}
+
+// Linux reports a removed working directory with a " (deleted)" suffix.
+func cwdUnder(cwd, root string) bool {
+	cwd = strings.TrimSuffix(cwd, " (deleted)")
+	return cwd == root || strings.HasPrefix(cwd, root+"/")
 }
 
 // reap sends SIGTERM, then SIGKILL, to this user's processes, other than this

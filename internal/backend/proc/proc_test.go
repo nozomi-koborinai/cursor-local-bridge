@@ -98,17 +98,57 @@ func TestEndUnderEndsProcessesWorkingInTheDir(t *testing.T) {
 }
 
 func TestEndUnderResolvesSymlinks(t *testing.T) {
-	base := t.TempDir()
-	run := mkdir(t, base, "run-1")
-	link := filepath.Join(base, "link")
-	if err := os.Symlink(run, link); err != nil {
+	real := t.TempDir()
+	parent := filepath.Join(t.TempDir(), "parent")
+	if err := os.Symlink(real, parent); err != nil {
 		t.Fatal(err)
 	}
+	run := mkdir(t, real, "run-1")
 	_, pid := startDetaching(t, run, "empty")
+
+	EndUnder(filepath.Join(parent, "run-1"))
+
+	waitGone(t, pid, "a sleep working in the dir a symlinked parent names")
+}
+
+func TestEndUnderDoesNotFollowASymlinkAtTheDir(t *testing.T) {
+	base := t.TempDir()
+	elsewhere := t.TempDir()
+	link := filepath.Join(base, "run-1")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	ended := sleepIn(t, elsewhere)
 
 	EndUnder(link)
 
-	waitGone(t, pid, "a sleep working in the dir the symlink names")
+	time.Sleep(time.Second)
+	select {
+	case <-ended:
+		t.Fatal("EndUnder ended a sleep working in the directory a symlink at the path names")
+	default:
+	}
+}
+
+func TestEndUnderMatchesAMissingDirUnderASymlinkedParent(t *testing.T) {
+	real := t.TempDir()
+	parent := filepath.Join(t.TempDir(), "parent")
+	if err := os.Symlink(real, parent); err != nil {
+		t.Fatal(err)
+	}
+	run := mkdir(t, real, "run-1")
+	ended := sleepIn(t, run)
+	if err := os.Remove(run); err != nil {
+		t.Fatal(err)
+	}
+
+	EndUnder(filepath.Join(parent, "run-1"))
+
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EndUnder left a sleep whose working directory is the removed dir under the resolved parent")
+	}
 }
 
 func TestEndUnderNeedsAnAbsoluteDirOtherThanTheRoot(t *testing.T) {
