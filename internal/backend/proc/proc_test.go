@@ -3,7 +3,9 @@ package proc
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -11,6 +13,99 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("PROC_TEST_DETACH") == "1" {
+		detach()
+	}
+	os.Exit(m.Run())
+}
+
+// detach starts a sleep in a new session, prints its pid, and exits, which
+// leaves the sleep outside the process group that Stop kills.
+func detach() {
+	cmd := exec.Command("sleep", "120")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(cmd.Process.Pid)
+	os.Exit(0)
+}
+
+func TestStopEndsDescendantsThatLeftTheGroup(t *testing.T) {
+	dir := t.TempDir()
+	p, grandchild := startDetaching(t, dir)
+	_, otherGrandchild := startDetaching(t, dir)
+
+	bystander := exec.Command("sleep", "120")
+	bystander.Dir = dir
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		_ = bystander.Wait()
+		close(ended)
+	}()
+	t.Cleanup(func() {
+		_ = bystander.Process.Kill()
+		<-ended
+	})
+
+	p.Stop()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(grandchild, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(grandchild, syscall.SIGKILL)
+			t.Fatalf("process %d, which the stopped process started in a new session, still runs 5s after Stop", grandchild)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	select {
+	case <-ended:
+		t.Error("Stop ended a sleep that the test started itself in the same directory")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := syscall.Kill(otherGrandchild, 0); err != nil {
+		t.Errorf("Stop ended process %d, which another Process left running: kill(0) = %v", otherGrandchild, err)
+	}
+}
+
+// startDetaching returns the Process of an exited detach helper and the pid
+// of the sleep it left running.
+func startDetaching(t *testing.T, dir string) (*Process, int) {
+	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A helper that misses PROC_TEST_DETACH runs no tests instead of this
+	// one, which would start helpers of its own.
+	cmd := exec.Command(self, "-test.run=^$")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH=1")
+	p, err := Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Stop)
+	out, err := io.ReadAll(p.Stdout)
+	_ = p.Stdout.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Wait(); err != nil {
+		t.Fatalf("detach helper: %v", p.Explain(err))
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p, pid
+}
 
 func TestStopEndsChildrenThatIgnoreSIGTERM(t *testing.T) {
 	p, err := Start(exec.Command("sh", "-c", `(trap "" TERM; exec sleep 60) & echo $!; wait`))
@@ -72,15 +167,43 @@ func TestOutputBeforeExitIsKept(t *testing.T) {
 	}
 }
 
-func TestStderrKeepsOnlyTheTail(t *testing.T) {
-	p, err := Start(exec.Command("sh", "-c", `head -c 20000 /dev/zero | tr '\0' a >&2; echo END >&2`))
-	if err != nil {
-		t.Fatal(err)
+func TestExplainShowsTheStartOfStderr(t *testing.T) {
+	a512 := strings.Repeat("a", 512)
+	tests := []struct {
+		name, stderr, want string
+	}{
+		{"512 bytes are not cut", "\n" + a512 + "\n", "failed; stderr: " + a512},
+		{
+			"longer is cut before a split rune",
+			"\nError: " + strings.Repeat("é", 600) + "\n",
+			"failed; stderr: Error: " + strings.Repeat("é", 252) + " [696 more bytes]",
+		},
+		{
+			"longer than the capture keeps its first line",
+			"Error: first line\n" + strings.Repeat("a", 20000) + "END",
+			"failed; stderr: Error: first line\n" + strings.Repeat("a", 512-18) + " [19509 more bytes]",
+		},
 	}
-	_ = p.Wait()
-	_ = p.Stdout.Close()
-	msg := p.Explain(errors.New("failed")).Error()
-	if !strings.HasSuffix(msg, "END") || len(msg) > tailSize+len("failed; stderr: ") {
-		t.Errorf("Explain kept %d bytes ending %q", len(msg), msg[len(msg)-10:])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", `printf '%s' "$STDERR" >&2`)
+			cmd.Env = append(os.Environ(), "STDERR="+tt.stderr)
+			p, err := Start(cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = p.Wait()
+			_ = p.Stdout.Close()
+			if got := p.Explain(errors.New("failed")).Error(); got != tt.want {
+				t.Errorf("Explain = %s, want %s", brief(got), brief(tt.want))
+			}
+		})
 	}
+}
+
+func brief(s string) string {
+	if len(s) <= 100 {
+		return strconv.Quote(s)
+	}
+	return fmt.Sprintf("%q...%q (%d bytes)", s[:50], s[len(s)-50:], len(s))
 }

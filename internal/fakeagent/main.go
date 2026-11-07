@@ -4,7 +4,8 @@
 //
 // Chats persist in $FAKEAGENT_STATE_DIR, where every start also appends its
 // argv to invocations.log. FAKEAGENT_LOGGED_OUT=1 mimics a CLI that has no
-// "agent login" credentials.
+// "agent login" credentials. "--model invalid-model acp" mimics a CLI that
+// rejects the model: it exits during authenticate.
 package main
 
 import (
@@ -42,7 +43,7 @@ func run(argv []string) error {
 	case *printMode:
 		return runPrint(o, strings.Join(args, " "))
 	case len(args) == 1 && args[0] == "acp":
-		return runACP()
+		return runACP(o.model)
 	case len(args) == 1 && args[0] == "create-chat":
 		return createChat()
 	}
@@ -58,6 +59,7 @@ const (
 	scriptPermission
 	scriptSlow
 	scriptCrash
+	scriptBackground
 )
 
 func scriptFor(prompt string) script {
@@ -68,6 +70,8 @@ func scriptFor(prompt string) script {
 		return scriptSlow
 	case strings.Contains(prompt, "[permission]"):
 		return scriptPermission
+	case strings.Contains(prompt, "[background]"):
+		return scriptBackground
 	}
 	return scriptEcho
 }

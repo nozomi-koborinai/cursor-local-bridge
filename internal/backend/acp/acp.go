@@ -117,7 +117,7 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 		if err == nil {
 			err = errors.New("exit status 0")
 		}
-		s.end(p.Explain(fmt.Errorf("agent acp exited (%w)", err)))
+		s.end(exited{p: p, status: err})
 	}()
 
 	ctx, cancel := s.bind(ctx)
@@ -268,7 +268,12 @@ func (s *Session) failure(conn *acpsdk.ClientSideConnection, op string, err erro
 		}
 	default:
 	}
-	if cause := context.Cause(s.life); cause != nil {
+	cause := context.Cause(s.life)
+	var exit exited
+	if errors.As(cause, &exit) {
+		return exit.p.Explain(fmt.Errorf("%w before it answered %s", exit, op))
+	}
+	if cause != nil {
 		return fmt.Errorf("%s: %w", op, cause)
 	}
 	var reqErr *acpsdk.RequestError
@@ -277,6 +282,14 @@ func (s *Session) failure(conn *acpsdk.ClientSideConnection, op string, err erro
 	}
 	return fmt.Errorf("agent acp %s: %w", op, err)
 }
+
+// exited ends a session whose agent process exited on its own.
+type exited struct {
+	p      *proc.Process
+	status error
+}
+
+func (e exited) Error() string { return fmt.Sprintf("agent acp exited (%v)", e.status) }
 
 func offersAuth(methods []acpsdk.AuthMethod, id string) bool {
 	for _, m := range methods {

@@ -432,3 +432,27 @@ func TestStartFailsWhenLoggedOut(t *testing.T) {
 	}
 	assertGone(t, lastPid(t, state))
 }
+
+func TestStartReportsAnAgentThatExitsBeforeAnswering(t *testing.T) {
+	useState(t)
+	s := New(fakeAgent, &recorder{})
+	_, err := s.Start(context.Background(), backend.StartOptions{Dir: t.TempDir(), Model: "invalid-model"})
+	if err == nil {
+		t.Fatal("Start succeeded although the agent exited")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"agent acp exited (exit status 1) before it answered authenticate; stderr: ",
+		"Cannot use this model: invalid-model. Available models: ",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not contain %q: %.300q", want, msg)
+		}
+	}
+	if strings.HasPrefix(msg, "authenticate:") {
+		t.Errorf("error starts with authenticate:, which reads as a login failure: %.300q", msg)
+	}
+	if len(msg) >= 700 {
+		t.Errorf("error is %d bytes, want under 700", len(msg))
+	}
+}

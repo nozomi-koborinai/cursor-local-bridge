@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -194,6 +195,27 @@ func TestCLB(t *testing.T) {
 		}
 		if want := []string{slow.ID, denied.ID, approved.ID, hello.ID}; !slices.Equal(ids, want) {
 			t.Errorf("list = %v, want %v", ids, want)
+		}
+	})
+
+	step("a finished run leaves no background command running", func(t *testing.T) {
+		launched := c.run(t, "launch", "--repo", repo, "[background] start a dev server")
+		c.waitStatus(t, launched.ID, "finished")
+		b, err := os.ReadFile(filepath.Join(state, "background.pid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			if time.Now().After(deadline) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatalf("background process %d still runs 10s after the run finished", pid)
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 	})
 

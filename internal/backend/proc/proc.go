@@ -1,9 +1,13 @@
 // Package proc runs an agent CLI process in its own process group, so that
-// stopping it also stops the processes it spawned, and keeps the tail of its
-// stderr for error messages.
+// stopping it also stops the processes it spawned, and keeps the beginning of
+// its stderr for error messages. A token in the process's environment marks
+// the descendants that leave the group, so that stopping it ends them too.
 package proc
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +15,17 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	tailSize  = 8 << 10
-	stopGrace = 3 * time.Second
+	stderrSize  = 8 << 10
+	explainSize = 512
+	stopGrace   = 3 * time.Second
+	reapGrace   = time.Second
+	reapRounds  = 3
+	reapPoll    = 50 * time.Millisecond
+	tokenVar    = "CLB_PROC_TOKEN"
 )
 
 // StderrWait is how long Wait keeps reading stderr after the process exits,
@@ -29,20 +39,27 @@ type Process struct {
 	Stdout *os.File
 
 	cmd      *exec.Cmd
-	stderr   tail
+	mark     string
+	stderr   head
 	done     chan struct{}
 	err      error
 	stopOnce sync.Once
 }
 
-// Start starts cmd in a new process group. The caller may set cmd.Stdin but
-// not cmd.Stdout or cmd.Stderr.
+// Start starts cmd in a new process group and adds CLB_PROC_TOKEN, with a
+// value unique to this process, to its environment. The caller may set
+// cmd.Stdin and cmd.Env but not cmd.Stdout or cmd.Stderr.
 func Start(cmd *exec.Cmd) (*Process, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return nil, err
+	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
-	p := &Process{Stdout: r, cmd: cmd, done: make(chan struct{})}
+	p := &Process{Stdout: r, cmd: cmd, mark: tokenVar + "=" + hex.EncodeToString(token[:]), done: make(chan struct{})}
+	cmd.Env = append(cmd.Environ(), p.mark)
 	cmd.Stdout = w
 	cmd.Stderr = &p.stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -67,19 +84,34 @@ func (p *Process) Wait() error {
 	return p.err
 }
 
-// Explain appends the tail of the process's stderr to err.
+// Explain appends the first explainSize bytes of the process's stderr to err,
+// and how many bytes it left out. CLI errors lead with the message, and the
+// result ends up in a run's error and its webhook payload.
 func (p *Process) Explain(err error) error {
-	tail := strings.TrimSpace(p.stderr.String())
-	if tail == "" {
+	text, dropped := p.stderr.contents()
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return err
 	}
-	return fmt.Errorf("%w; stderr: %s", err, tail)
+	cut := len(text)
+	if cut > explainSize {
+		cut = explainSize
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+	}
+	if more := len(text) - cut + dropped; more > 0 {
+		return fmt.Errorf("%w; stderr: %s [%d more bytes]", err, text[:cut], more)
+	}
+	return fmt.Errorf("%w; stderr: %s", err, text)
 }
 
 // Stop sends SIGTERM to the process group, waits up to 3s for the process to
 // exit, then sends SIGKILL to the group so that children which ignored
-// SIGTERM end too. It returns after the process has exited and is safe to
-// call more than once.
+// SIGTERM end too. Then it ends the descendants that left the group, such as
+// a command the agent ran in its own session. It finds them by the token in
+// their environment, so it misses a descendant that dropped the token. It
+// returns after the process has exited and is safe to call more than once.
 func (p *Process) Stop() {
 	p.stopOnce.Do(func() {
 		pgid := p.cmd.Process.Pid
@@ -90,26 +122,63 @@ func (p *Process) Stop() {
 		}
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		<-p.done
+		p.reap()
 	})
 }
 
-type tail struct {
-	mu  sync.Mutex
-	buf []byte
+// reap scans again after each round of signals because a process can start
+// another while it handles SIGTERM.
+func (p *Process) reap() {
+	sig := syscall.SIGTERM
+	for range reapRounds {
+		pids := marked(p.mark)
+		if len(pids) == 0 {
+			return
+		}
+		for _, pid := range pids {
+			_ = syscall.Kill(pid, sig)
+		}
+		sig = syscall.SIGKILL
+		deadline := time.Now().Add(reapGrace)
+		for len(pids) > 0 && time.Now().Before(deadline) {
+			time.Sleep(reapPoll)
+			pids = marked(p.mark)
+		}
+	}
 }
 
-func (t *tail) Write(b []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.buf = append(t.buf, b...)
-	if over := len(t.buf) - tailSize; over > 0 {
-		t.buf = append(t.buf[:0], t.buf[over:]...)
+// hasEntry reports whether entry is one of the NUL-terminated strings in env
+// before the first empty one.
+func hasEntry(env []byte, entry string) bool {
+	for e := range bytes.SplitSeq(env, []byte{0}) {
+		if len(e) == 0 {
+			return false
+		}
+		if string(e) == entry {
+			return true
+		}
 	}
+	return false
+}
+
+// head keeps the first stderrSize bytes written to it and counts the rest.
+type head struct {
+	mu      sync.Mutex
+	buf     []byte
+	dropped int
+}
+
+func (h *head) Write(b []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := min(len(b), stderrSize-len(h.buf))
+	h.buf = append(h.buf, b[:n]...)
+	h.dropped += len(b) - n
 	return len(b), nil
 }
 
-func (t *tail) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.buf)
+func (h *head) contents() (string, int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return string(h.buf), h.dropped
 }
