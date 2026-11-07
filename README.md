@@ -1,4 +1,4 @@
-![Cursor Local Bridge](https://github.com/user-attachments/assets/b1e3a49f-e02f-437c-9bf0-012320b2ccd4)
+![Cursor Local Bridge](https://github.com/user-attachments/assets/0be6bacb-d6e3-492a-be27-8dab27d55f6b)
 
 # Cursor Local Bridge
 
