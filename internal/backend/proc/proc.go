@@ -2,6 +2,8 @@
 // stopping it also stops the processes it spawned, and keeps the beginning of
 // its stderr for error messages. A token in the process's environment marks
 // the descendants that leave the group, so that stopping it ends them too.
+// EndUnder ends the processes working in a directory, which also finds the
+// descendants that cleared their environment.
 package proc
 
 import (
@@ -11,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -122,16 +125,50 @@ func (p *Process) Stop() {
 		}
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		<-p.done
-		p.reap()
+		reap(func(pid int) bool {
+			env, err := environOf(pid)
+			return err == nil && hasEntry(env, p.mark)
+		})
 	})
 }
 
-// reap scans again after each round of signals because a process can start
-// another while it handles SIGTERM.
-func (p *Process) reap() {
+// EndUnder ends this user's processes, other than this one, whose working
+// directory is dir or below it, the way Stop ends the descendants that left
+// the group. It does nothing unless dir is absolute and not the root.
+func EndUnder(dir string) {
+	if !filepath.IsAbs(dir) {
+		return
+	}
+	// Kernels report working directories with symlinks resolved.
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		root = filepath.Clean(dir)
+	}
+	if root == "/" {
+		return
+	}
+	reap(func(pid int) bool {
+		cwd, err := cwdOf(pid)
+		return err == nil && (cwd == root || strings.HasPrefix(cwd, root+"/"))
+	})
+}
+
+// reap sends SIGTERM, then SIGKILL, to this user's processes, other than this
+// one, that match. It scans again after each round of signals because a
+// process can start another while it handles SIGTERM.
+func reap(match func(pid int) bool) {
+	scan := func() []int {
+		var pids []int
+		for _, pid := range userPids() {
+			if match(pid) {
+				pids = append(pids, pid)
+			}
+		}
+		return pids
+	}
 	sig := syscall.SIGTERM
 	for range reapRounds {
-		pids := marked(p.mark)
+		pids := scan()
 		if len(pids) == 0 {
 			return
 		}
@@ -142,7 +179,7 @@ func (p *Process) reap() {
 		deadline := time.Now().Add(reapGrace)
 		for len(pids) > 0 && time.Now().Before(deadline) {
 			time.Sleep(reapPoll)
-			pids = marked(p.mark)
+			pids = scan()
 		}
 	}
 }
