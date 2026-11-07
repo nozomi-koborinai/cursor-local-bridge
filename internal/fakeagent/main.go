@@ -58,6 +58,7 @@ const (
 	scriptPermission
 	scriptSlow
 	scriptCrash
+	scriptBackground
 )
 
 func scriptFor(prompt string) script {
@@ -68,6 +69,8 @@ func scriptFor(prompt string) script {
 		return scriptSlow
 	case strings.Contains(prompt, "[permission]"):
 		return scriptPermission
+	case strings.Contains(prompt, "[background]"):
+		return scriptBackground
 	}
 	return scriptEcho
 }

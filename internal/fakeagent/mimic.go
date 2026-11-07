@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
+
+	acp "github.com/coder/acp-go-sdk"
 )
 
 const invalidModel = "invalid-model"
@@ -18,4 +25,21 @@ func rejectModel() {
 	}
 	fmt.Fprintf(os.Stderr, "Cannot use this model: %s. Available models: %s\n", invalidModel, strings.Join(names, ", "))
 	os.Exit(1)
+}
+
+// background leaves a command running after the turn ends, the way the real
+// CLI's backgrounded shell commands do. The command runs in its own session,
+// outside the agent's process group.
+func (a *fakeACP) background(ctx context.Context, sid acp.SessionId) (string, error) {
+	cmd := exec.Command("sleep", "120")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	pid := strconv.Itoa(cmd.Process.Pid)
+	if err := os.WriteFile(filepath.Join(stateDir(), "background.pid"), []byte(pid+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	reply := "background: started " + pid
+	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
 }

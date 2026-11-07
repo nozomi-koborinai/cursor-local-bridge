@@ -145,6 +145,8 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		reply, err = a.slow(ctx, req.SessionId)
 	case scriptPermission:
 		reply, err = a.askPermission(ctx, req.SessionId)
+	case scriptBackground:
+		reply, err = a.background(ctx, req.SessionId)
 	default:
 		reply, err = a.echo(ctx, req.SessionId, prompt.String())
 	}
