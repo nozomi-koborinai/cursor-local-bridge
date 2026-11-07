@@ -3,7 +3,9 @@ package proc
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -72,15 +74,43 @@ func TestOutputBeforeExitIsKept(t *testing.T) {
 	}
 }
 
-func TestStderrKeepsOnlyTheTail(t *testing.T) {
-	p, err := Start(exec.Command("sh", "-c", `head -c 20000 /dev/zero | tr '\0' a >&2; echo END >&2`))
-	if err != nil {
-		t.Fatal(err)
+func TestExplainShowsTheStartOfStderr(t *testing.T) {
+	a512 := strings.Repeat("a", 512)
+	tests := []struct {
+		name, stderr, want string
+	}{
+		{"512 bytes are not cut", "\n" + a512 + "\n", "failed; stderr: " + a512},
+		{
+			"longer is cut before a split rune",
+			"\nError: " + strings.Repeat("é", 600) + "\n",
+			"failed; stderr: Error: " + strings.Repeat("é", 252) + " [696 more bytes]",
+		},
+		{
+			"longer than the capture keeps its first line",
+			"Error: first line\n" + strings.Repeat("a", 20000) + "END",
+			"failed; stderr: Error: first line\n" + strings.Repeat("a", 512-18) + " [19509 more bytes]",
+		},
 	}
-	_ = p.Wait()
-	_ = p.Stdout.Close()
-	msg := p.Explain(errors.New("failed")).Error()
-	if !strings.HasSuffix(msg, "END") || len(msg) > tailSize+len("failed; stderr: ") {
-		t.Errorf("Explain kept %d bytes ending %q", len(msg), msg[len(msg)-10:])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", `printf '%s' "$STDERR" >&2`)
+			cmd.Env = append(os.Environ(), "STDERR="+tt.stderr)
+			p, err := Start(cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = p.Wait()
+			_ = p.Stdout.Close()
+			if got := p.Explain(errors.New("failed")).Error(); got != tt.want {
+				t.Errorf("Explain = %s, want %s", brief(got), brief(tt.want))
+			}
+		})
 	}
+}
+
+func brief(s string) string {
+	if len(s) <= 100 {
+		return strconv.Quote(s)
+	}
+	return fmt.Sprintf("%q...%q (%d bytes)", s[:50], s[len(s)-50:], len(s))
 }

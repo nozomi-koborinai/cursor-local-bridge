@@ -1,6 +1,6 @@
 // Package proc runs an agent CLI process in its own process group, so that
-// stopping it also stops the processes it spawned, and keeps the tail of its
-// stderr for error messages.
+// stopping it also stops the processes it spawned, and keeps the beginning of
+// its stderr for error messages.
 package proc
 
 import (
@@ -11,11 +11,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	tailSize  = 8 << 10
-	stopGrace = 3 * time.Second
+	stderrSize  = 8 << 10
+	explainSize = 512
+	stopGrace   = 3 * time.Second
 )
 
 // StderrWait is how long Wait keeps reading stderr after the process exits,
@@ -29,7 +31,7 @@ type Process struct {
 	Stdout *os.File
 
 	cmd      *exec.Cmd
-	stderr   tail
+	stderr   head
 	done     chan struct{}
 	err      error
 	stopOnce sync.Once
@@ -67,13 +69,26 @@ func (p *Process) Wait() error {
 	return p.err
 }
 
-// Explain appends the tail of the process's stderr to err.
+// Explain appends the first explainSize bytes of the process's stderr to err,
+// and how many bytes it left out. CLI errors lead with the message, and the
+// result ends up in a run's error and its webhook payload.
 func (p *Process) Explain(err error) error {
-	tail := strings.TrimSpace(p.stderr.String())
-	if tail == "" {
+	text, dropped := p.stderr.contents()
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return err
 	}
-	return fmt.Errorf("%w; stderr: %s", err, tail)
+	cut := len(text)
+	if cut > explainSize {
+		cut = explainSize
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+	}
+	if more := len(text) - cut + dropped; more > 0 {
+		return fmt.Errorf("%w; stderr: %s [%d more bytes]", err, text[:cut], more)
+	}
+	return fmt.Errorf("%w; stderr: %s", err, text)
 }
 
 // Stop sends SIGTERM to the process group, waits up to 3s for the process to
@@ -93,23 +108,24 @@ func (p *Process) Stop() {
 	})
 }
 
-type tail struct {
-	mu  sync.Mutex
-	buf []byte
+// head keeps the first stderrSize bytes written to it and counts the rest.
+type head struct {
+	mu      sync.Mutex
+	buf     []byte
+	dropped int
 }
 
-func (t *tail) Write(b []byte) (int, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.buf = append(t.buf, b...)
-	if over := len(t.buf) - tailSize; over > 0 {
-		t.buf = append(t.buf[:0], t.buf[over:]...)
-	}
+func (h *head) Write(b []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := min(len(b), stderrSize-len(h.buf))
+	h.buf = append(h.buf, b[:n]...)
+	h.dropped += len(b) - n
 	return len(b), nil
 }
 
-func (t *tail) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.buf)
+func (h *head) contents() (string, int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return string(h.buf), h.dropped
 }

@@ -14,6 +14,8 @@ import (
 const cursorLogin = "cursor_login"
 
 type fakeACP struct {
+	model string
+
 	mu            sync.Mutex
 	conn          *acp.AgentSideConnection
 	authenticated bool
@@ -25,8 +27,8 @@ var (
 	_ acp.AgentLoader = (*fakeACP)(nil)
 )
 
-func runACP() error {
-	a := &fakeACP{chats: map[acp.SessionId]*chat{}}
+func runACP(model string) error {
+	a := &fakeACP{model: model, chats: map[acp.SessionId]*chat{}}
 	conn := acp.NewAgentSideConnection(a, os.Stdout, os.Stdin)
 	a.mu.Lock()
 	a.conn = conn
@@ -53,6 +55,9 @@ func (a *fakeACP) Initialize(context.Context, acp.InitializeRequest) (acp.Initia
 }
 
 func (a *fakeACP) Authenticate(ctx context.Context, req acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
+	if a.model == invalidModel {
+		rejectModel()
+	}
 	if loggedOut() {
 		// The real CLI never answers authenticate when it has no credentials.
 		<-ctx.Done()
