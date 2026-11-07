@@ -12,7 +12,7 @@ Use it in environments where cloud agents are not available.
 
 - `clb daemon` runs in the background and listens on a unix socket that only your user can open.
 - `clb launch` creates a run. The daemon adds a git worktree for the run on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com).
-- The daemon stores every run and every event the agent streams in SQLite. When a follow-up resumes a session, the history the agent replays is not stored again. It also writes each run's events to an NDJSON file that you can `tail -f`.
+- The daemon stores every run and the events the agent streams in SQLite. [Events](#events) lists the types it skips. When a follow-up resumes a session, the history the agent replays is not stored again. The daemon also writes each run's events to an NDJSON file that you can `tail -f`.
 - When the Cursor CLI sends a permission request, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`, and `clb` passes your answer back. Whether the CLI asks before it uses a tool depends on the CLI's own settings. It can apply a file edit without asking. See [Security](#security).
 - When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if you configured one.
 
@@ -213,6 +213,8 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 
 - `status`, `prompt`, `permission_requested`, `permission_answered`, and `webhook` events come from the daemon.
 - Other types come from the agent unchanged. With the `acp` backend they are ACP `sessionUpdate` values such as `agent_message_chunk`, `tool_call`, and `plan`, plus `turn_ended`. With the `print` backend they are stream-json `type` values.
+- By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
+- The Cursor CLI sends the first `tool_call` event for a shell command with `rawInput` set to `{}` and puts the command in a later `tool_call_update` event with the same `toolCallId`. A `tool_call_update` carries only the fields that changed. To get a tool's input, read the latest `rawInput` among the events for its `toolCallId`.
 
 The same lines are in `~/.clb/logs/<run id>.ndjson`. SQLite is the source of truth. The daemon rewrites the NDJSON files from SQLite when it starts.
 
@@ -266,6 +268,7 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
   "model": "",
   "socketPath": "",
   "worktreeDir": "",
+  "storeAllEvents": false,
   "webhook": {
     "url": "https://example.com/hooks/clb",
     "secret": "a long random string"
@@ -280,6 +283,7 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
 | `model` | empty | Passed to the CLI as `--model`. Empty lets the CLI choose. `clb launch --model` overrides it. |
 | `socketPath` | `<home>/clb.sock` | The daemon socket. It must be shorter than 104 bytes. |
 | `worktreeDir` | `<home>/worktrees` | Where run worktrees go. |
+| `storeAllEvents` | `false` | Store `agent_thought_chunk` and `available_commands_update` events too. |
 | `webhook.url` | empty | Where to post run status changes. |
 | `webhook.secret` | empty | The HMAC key. Required when `webhook.url` is set. |
 
