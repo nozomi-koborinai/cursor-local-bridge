@@ -45,6 +45,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -count=1 -tags e2e -v ./e2e/...
+      - if: runner.os == 'macOS'
+        run: plutil -lint packaging/launchd/*.plist
 
   govulncheck:
     runs-on: ubuntu-latest
