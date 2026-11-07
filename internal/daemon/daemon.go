@@ -59,8 +59,8 @@ type Daemon struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	// writes carries the run goroutines' store calls. The end of ctx does
-	// not cancel it, so a transition in progress is stored whole: the run's
-	// row together with its events.
+	// not cancel it, so a transition in progress writes both the run's row
+	// and its events.
 	writes context.Context
 	wg     sync.WaitGroup
 

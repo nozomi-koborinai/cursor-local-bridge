@@ -1,7 +1,7 @@
 // Package ipc is the wire protocol between the clb CLI and the daemon. A
 // client connects to the daemon's unix socket, writes one Request as a JSON
 // line, and reads Response JSON lines until the daemon closes the connection.
-// The client keeps its side open until then: closing it early cancels the
+// The client keeps its side open until then. Closing it early cancels the
 // call.
 package ipc
 

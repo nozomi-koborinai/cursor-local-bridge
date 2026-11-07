@@ -100,8 +100,8 @@ func (a *app) daemonCmd() *cobra.Command {
 }
 
 func runDaemon(ctx context.Context, cfg config.Config, log *slog.Logger) error {
-	// Listen before Recover: Listen refuses to start while another daemon is
-	// serving, and Recover would fail that daemon's active runs.
+	// Listen refuses to start while another daemon is serving. It runs before
+	// Recover, which would otherwise fail that daemon's active runs.
 	ln, err := ipc.Listen(cfg.SocketPath)
 	if err != nil {
 		return err

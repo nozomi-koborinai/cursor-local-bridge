@@ -316,7 +316,8 @@ func (p *process) wait(t *testing.T) {
 	}
 }
 
-// stop ends p if it is still running: SIGTERM first, then SIGKILL.
+// stop ends p if it is still running. It sends SIGTERM, then SIGKILL if p
+// outlives the timeout.
 func (p *process) stop() {
 	if p.exited() {
 		return
