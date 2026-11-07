@@ -348,6 +348,38 @@ func TestResolveCommit(t *testing.T) {
 	}
 }
 
+func TestAddRecreatesADeletedWorktree(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "wt")
+	const branch = "clb/run-again"
+	if err := Add(ctx, repo, path, branch, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "keep.txt"), []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, path, "add", "keep.txt")
+	gitOut(t, path, "commit", "-m", "keep")
+	sha := gitOut(t, path, "rev-parse", "HEAD")
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Add(ctx, repo, path, branch, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOut(t, path, "rev-parse", "HEAD"); got != sha {
+		t.Fatalf("HEAD = %s, want %s", got, sha)
+	}
+	body, err := os.ReadFile(filepath.Join(path, "keep.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "kept\n" {
+		t.Fatalf("keep.txt = %q", body)
+	}
+}
+
 func TestAddRejectsABaseRefThatIsNotACommit(t *testing.T) {
 	repo, _ := newRepo(t)
 	ctx := t.Context()

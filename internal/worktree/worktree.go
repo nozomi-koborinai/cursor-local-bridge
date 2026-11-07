@@ -25,7 +25,9 @@ func Root(ctx context.Context, dir string) (string, error) {
 // baseRef. baseRef must name a commit. Add passes that commit to git, not
 // the caller's string, so a string that starts with '-' cannot be parsed as
 // a flag. If path is already a worktree of repo, Add does nothing. If the
-// branch exists from an earlier attempt, Add checks it out instead.
+// directory is gone but git still lists it, Add prunes that record first.
+// Git refuses to add a path it still has registered. If the branch exists
+// from an earlier attempt, Add checks it out instead.
 func Add(ctx context.Context, repo, path, branch, baseRef string) error {
 	registered, err := isWorktree(ctx, repo, path)
 	if err != nil {
@@ -46,6 +48,9 @@ func Add(ctx context.Context, repo, path, branch, baseRef string) error {
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if _, err := git(ctx, repo, "worktree", "prune"); err != nil {
 		return err
 	}
 	if exists {
