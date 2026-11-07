@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
@@ -57,8 +58,15 @@ type webhookData struct {
 // the only writer of the run's row, events, and NDJSON log. The fields after
 // inbox belong to that goroutine.
 type actor struct {
-	d     *Daemon
-	id    store.RunID
+	d  *Daemon
+	id store.RunID
+
+	// sweepMu guards sweeper, the newest generation. Only its goroutine
+	// sweeps the worktree after Close, so a generation whose Close outlasted
+	// closeWait cannot end the processes of the one that replaced it.
+	sweepMu sync.Mutex
+	sweeper *generation
+
 	inbox chan func()
 
 	gen *generation
@@ -240,6 +248,9 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
 	g.session = newSession(sink{a: a, g: g})
 	a.gen = g
+	a.sweepMu.Lock()
+	a.sweeper = g
+	a.sweepMu.Unlock()
 
 	opts := backend.StartOptions{Dir: run.Worktree, Model: run.Model}
 	if resume {
@@ -253,8 +264,19 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
 		}
-		proc.EndUnder(run.Worktree)
+		a.sweep(g, run.Worktree)
 	})
+}
+
+// sweep ends the processes left in dir unless a newer generation than g has
+// started. It holds sweepMu while it sweeps, so startBackend cannot start the
+// next session until the sweep is over.
+func (a *actor) sweep(g *generation, dir string) {
+	a.sweepMu.Lock()
+	defer a.sweepMu.Unlock()
+	if a.sweeper == g {
+		proc.EndUnder(dir)
+	}
 }
 
 func (a *actor) started(sessionID string, err error) {
@@ -381,7 +403,7 @@ func (a *actor) closeBackend() {
 // proc.Stop sends SIGKILL after its grace period, and a sweep gives up after
 // its last round. A resumed session must not start while the sweep could
 // still end it.
-const closeWait = 15 * time.Second
+var closeWait = 15 * time.Second
 
 // awaitClosed waits for the last closed session's agent to exit and for the
 // sweep of the worktree, so that neither is still running when the worktree
