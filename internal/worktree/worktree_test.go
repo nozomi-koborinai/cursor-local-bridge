@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -122,38 +123,133 @@ func TestRemoveTwice(t *testing.T) {
 	}
 }
 
-func TestRemoveDiscardsUncommittedChanges(t *testing.T) {
+func TestRemoveSavesUncommittedWork(t *testing.T) {
 	repo, head := newRepo(t)
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "wt")
-	const branch = "clb/run-5"
+	const branch = "clb/run-save"
 	if err := Add(ctx, repo, path, branch, head); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, "dirty.txt"), []byte("nope\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(path, ".gitignore"), []byte("secret.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, path, "add", ".gitignore")
+	gitOut(t, path, "commit", "-m", "ignore rules")
+	writeHook(t, path, "#!/bin/sh\necho hook-refused >&2\nexit 1\n")
+	gitOut(t, path, "config", "commit.gpgsign", "true")
+	gitOut(t, path, "config", "gpg.program", "false")
+
+	if err := os.WriteFile(filepath.Join(path, "README"), []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "note.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "secret.txt"), []byte("nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, path, "add", "-A")
+	if out, err := exec.Command("git", "-C", path, "commit", "-m", "blocked").CombinedOutput(); err == nil || !bytes.Contains(out, []byte("hook-refused")) {
+		t.Fatalf("pre-commit hook did not refuse the commit: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", path, "commit", "--no-verify", "-m", "blocked").CombinedOutput(); err == nil || !bytes.Contains(out, []byte("gpg failed to sign")) {
+		t.Fatalf("signing did not refuse the commit: %v\n%s", err, out)
+	}
+
+	if err := Remove(ctx, repo, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree stat = %v, want it gone", err)
+	}
+	if msg := gitOut(t, repo, "log", "-1", "--format=%s", branch); msg != "clb: save uncommitted changes before removing the worktree" {
+		t.Fatalf("commit message = %q", msg)
+	}
+	names := strings.Split(gitOut(t, repo, "ls-tree", "-r", "--name-only", branch), "\n")
+	for _, want := range []string{".gitignore", "README", "note.txt"} {
+		if !slices.Contains(names, want) {
+			t.Fatalf("tree = %q, want %s", names, want)
+		}
+	}
+	if slices.Contains(names, "secret.txt") {
+		t.Fatalf("tree = %q, want secret.txt left out", names)
+	}
+	if body := gitOut(t, repo, "show", branch+":README"); body != "changed" {
+		t.Fatalf("README = %q", body)
+	}
+	if body := gitOut(t, repo, "show", branch+":note.txt"); body != "new" {
+		t.Fatalf("note.txt = %q", body)
+	}
+	changed := strings.Split(gitOut(t, repo, "diff-tree", "--no-commit-id", "--name-only", "-r", branch), "\n")
+	if slices.Contains(changed, "secret.txt") || !slices.Contains(changed, "README") || !slices.Contains(changed, "note.txt") {
+		t.Fatalf("saved commit changed %q", changed)
+	}
+}
+
+func TestRemoveSavesWhenGitIdentityIsUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		configure  bool
+	}{
+		{name: "fallback", want: "clb <clb@localhost>"},
+		{name: "configured", want: "Ada Lovelace <ada@example.com>", configure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateGitConfig(t)
+			repo := initRepo(t)
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "wt")
+			const branch = "clb/run-ident"
+			head := gitOut(t, repo, "rev-parse", "HEAD")
+			if err := Add(ctx, repo, path, branch, head); err != nil {
+				t.Fatal(err)
+			}
+			if tc.configure {
+				gitOut(t, path, "config", "user.name", "Ada Lovelace")
+				gitOut(t, path, "config", "user.email", "ada@example.com")
+			}
+			if err := os.WriteFile(filepath.Join(path, "note.txt"), []byte("saved\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Remove(ctx, repo, path); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitOut(t, repo, "log", "-1", "--format=%an <%ae>", branch); got != tc.want {
+				t.Fatalf("author = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemoveLeavesTheWorktreeWhenTheSaveFails(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "wt")
+	const branch = "clb/run-lock"
+	if err := Add(ctx, repo, path, branch, head); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "README"), []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(ctx, repo, path); err != nil {
+	gitDir := gitOut(t, path, "rev-parse", "--absolute-git-dir")
+	if err := os.WriteFile(filepath.Join(gitDir, "index.lock"), []byte("locked\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	err := Remove(ctx, repo, path)
+	if err == nil {
+		t.Fatal("Remove succeeded while index.lock was held")
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("worktree stat = %v, want it kept after %v", statErr, err)
 	}
 	if got := gitOut(t, repo, "rev-parse", branch); got != head {
 		t.Fatalf("branch tip = %s, want %s", got, head)
 	}
-	if err := Add(ctx, repo, path, branch, head); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(path, "dirty.txt")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("dirty file stat = %v", err)
-	}
-	body, err := os.ReadFile(filepath.Join(path, "README"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "hi\n" {
-		t.Fatalf("README = %q", body)
+	body, readErr := os.ReadFile(filepath.Join(path, "README"))
+	if readErr != nil || string(body) != "changed\n" {
+		t.Fatalf("README = %q, %v", body, readErr)
 	}
 }
 
@@ -274,6 +370,62 @@ func TestAddRejectsABaseRefThatIsNotACommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func writeHook(t *testing.T, worktree, body string) {
+	t.Helper()
+	hook := gitOut(t, worktree, "rev-parse", "--git-path", "hooks/pre-commit")
+	if !filepath.IsAbs(hook) {
+		hook = filepath.Join(worktree, hook)
+	}
+	if err := os.MkdirAll(filepath.Dir(hook), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "no-gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+		"EMAIL",
+	} {
+		unsetEnv(t, key)
+	}
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	val, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, val)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
+func initRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	gitOut(t, repo, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("hi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, repo, "add", "README")
+	gitOut(t, repo, "-c", "user.name=setup", "-c", "user.email=setup@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "init")
+	return repo
 }
 
 func newRepo(t *testing.T) (string, string) {

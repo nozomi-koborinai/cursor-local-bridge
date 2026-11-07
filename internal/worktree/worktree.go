@@ -71,11 +71,16 @@ func ResolveCommit(ctx context.Context, repo, ref string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// Remove deletes the worktree at path, discarding uncommitted changes, and
-// prunes git's record of it. The branch and its commits stay. Removing a
-// worktree that no longer exists succeeds.
+// Remove deletes the worktree at path and prunes git's record of it. The
+// branch and its commits stay. Changes that are not committed yet are
+// committed onto the worktree's branch first. Ignored files are left out of
+// that commit. If the commit fails, the worktree stays. Removing a worktree
+// that no longer exists succeeds.
 func Remove(ctx context.Context, repo, path string) error {
 	if _, err := os.Lstat(path); err == nil {
+		if err := saveUncommitted(ctx, path); err != nil {
+			return err
+		}
 		if _, err := git(ctx, repo, "worktree", "remove", "--force", path); err != nil {
 			return err
 		}
@@ -84,6 +89,64 @@ func Remove(ctx context.Context, repo, path string) error {
 	}
 	_, err := git(ctx, repo, "worktree", "prune")
 	return err
+}
+
+const saveMessage = "clb: save uncommitted changes before removing the worktree"
+
+// saveUncommitted commits a dirty worktree onto its HEAD. The daemon has no
+// terminal, so the commit skips hooks and signing. Those would fail the save
+// and leave the worktree in place.
+func saveUncommitted(ctx context.Context, path string) error {
+	out, err := git(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	if _, err := git(ctx, path, "add", "-A"); err != nil {
+		return err
+	}
+	args := []string{"-c", "commit.gpgsign=false"}
+	missing, err := identityMissing(ctx, path)
+	if err != nil {
+		return err
+	}
+	if missing {
+		args = append(args, "-c", "user.name=clb", "-c", "user.email=clb@localhost")
+	}
+	args = append(args, "commit", "--no-verify", "-m", saveMessage)
+	_, err = git(ctx, path, args...)
+	return err
+}
+
+func identityMissing(ctx context.Context, path string) (bool, error) {
+	for _, key := range []string{"user.name", "user.email"} {
+		value, ok, err := gitConfig(ctx, path, key)
+		if err != nil {
+			return false, err
+		}
+		if !ok || value == "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func gitConfig(ctx context.Context, dir, key string) (string, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", "--get", key)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return strings.TrimSpace(stdout.String()), true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return "", false, nil
+	}
+	return "", false, gitErr([]string{"config", "--get", key}, err, stderr.String())
 }
 
 // git stores the worktree path after resolving symlinks. macOS temp dirs live

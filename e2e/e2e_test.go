@@ -219,6 +219,25 @@ func TestCLB(t *testing.T) {
 		}
 	})
 
+	step("stop commits an uncommitted file onto the run branch", func(t *testing.T) {
+		launched := c.run(t, "launch", "--repo", repo, "hello")
+		finished := c.waitStatus(t, launched.ID, "finished")
+		if err := os.WriteFile(filepath.Join(finished.Worktree, "note.txt"), []byte("keep\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if stopped := c.run(t, "stop", launched.ID); stopped.Status != "stopped" {
+			t.Errorf("stop printed status %s, want stopped", stopped.Status)
+		}
+		cmd := exec.Command("git", "-C", repo, "log", "-1", "--name-only", "--format=%s", finished.Branch)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git log: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "note.txt") {
+			t.Fatalf("git log = %q, want note.txt", out)
+		}
+	})
+
 	step("SIGTERM stops the daemon cleanly", func(t *testing.T) {
 		if err := daemon.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
