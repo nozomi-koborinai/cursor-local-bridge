@@ -66,7 +66,7 @@ func TestRunRoundTrip(t *testing.T) {
 	in.Lifecycle = lifecycle.Run{State: lifecycle.Running, Error: "later"}
 	in.CreatedAt = updated.Add(2 * time.Hour)
 	in.UpdatedAt = updated.Add(time.Hour)
-	if err := s.UpdateRun(ctx, in); err != nil {
+	if _, err := s.UpdateRun(ctx, in); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	got, err = s.GetRun(ctx, in.ID)
@@ -110,7 +110,7 @@ func TestNotFound(t *testing.T) {
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get err = %v", err)
 	}
-	err = s.UpdateRun(ctx, Run{
+	_, err = s.UpdateRun(ctx, Run{
 		ID:        "missing",
 		Backend:   backend.ACP,
 		Lifecycle: lifecycle.Run{State: lifecycle.Queued},
@@ -208,6 +208,65 @@ func TestEventsSeqFilterAndReopen(t *testing.T) {
 	}
 	if left != 0 {
 		t.Fatalf("events left after delete = %d", left)
+	}
+}
+
+func TestUpdateRunCommitsTheRowAndItsEventsTogether(t *testing.T) {
+	s := openStore(t)
+	ctx := t.Context()
+	at := time.Date(2026, 11, 7, 1, 2, 3, 0, time.UTC)
+	queued := newRun("run-1", at)
+	if err := s.CreateRun(ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendEvent(ctx, queued.ID, at, "status", json.RawMessage(`{"status":"queued"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	running := queued
+	running.Lifecycle.State = lifecycle.Running
+	running.UpdatedAt = at.Add(time.Second)
+	status := NewEvent{Time: running.UpdatedAt, Type: "status", Data: json.RawMessage(`{"status":"running"}`)}
+	appended, err := s.UpdateRun(ctx, running, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Event{RunID: running.ID, Seq: 2, Time: status.Time, Type: status.Type, Data: status.Data}
+	if len(appended) != 1 {
+		t.Fatalf("appended = %#v, want one event", appended)
+	}
+	assertEvent(t, appended[0], want)
+	got, err := s.GetRun(ctx, running.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRun(t, got, running)
+	events, err := s.Events(ctx, running.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events after the update = %#v, want the status event", events)
+	}
+	assertEvent(t, events[0], want)
+
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TRIGGER reject BEFORE INSERT ON events WHEN NEW.type = 'rejected'
+		BEGIN SELECT RAISE(ABORT, 'rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	stopped := running
+	stopped.Lifecycle.State = lifecycle.Stopped
+	if _, err := s.UpdateRun(ctx, stopped, NewEvent{Time: at, Type: "rejected", Data: json.RawMessage(`{}`)}); err == nil {
+		t.Fatal("an update whose event was rejected succeeded")
+	}
+	got, err = s.GetRun(ctx, running.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRun(t, got, running)
+	if events, err := s.Events(ctx, running.ID, 0); err != nil || len(events) != 2 {
+		t.Fatalf("events after the rejected update = %d, %v; want the 2 from before", len(events), err)
 	}
 }
 

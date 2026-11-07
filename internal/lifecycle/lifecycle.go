@@ -17,12 +17,14 @@ const (
 	AwaitingPermission State = "awaiting_permission"
 	Finished           State = "finished"
 	Failed             State = "failed"
-	Stopped            State = "stopped"
+	// Stopping lasts from a Stop until its RemoveWorktree reports back.
+	Stopping State = "stopping"
+	Stopped  State = "stopped"
 )
 
 var states = map[State]bool{
 	Queued: true, Running: true, AwaitingPermission: true,
-	Finished: true, Failed: true, Stopped: true,
+	Finished: true, Failed: true, Stopping: true, Stopped: true,
 }
 
 func ParseState(s string) (State, error) {
@@ -74,19 +76,29 @@ type PermissionAnswered struct{ Approve bool }
 // FollowUp queues a prompt, or resumes a finished run with it.
 type FollowUp struct{ Prompt string }
 
-// Stop ends the run and releases its worktree.
+// Stop ends the run and releases its worktree. The run is stopping until the
+// removal reports back.
 type Stop struct{}
 
 // BackendFailed reports that the agent process failed or exited.
 type BackendFailed struct{ Err string }
 
-func (Started) event()             {}
-func (TurnEnded) event()           {}
-func (PermissionRequested) event() {}
-func (PermissionAnswered) event()  {}
-func (FollowUp) event()            {}
-func (Stop) event()                {}
-func (BackendFailed) event()       {}
+// WorktreeRemoved reports that a RemoveWorktree effect removed the worktree.
+type WorktreeRemoved struct{}
+
+// WorktreeRemoveFailed reports that a RemoveWorktree effect could not
+// remove the worktree.
+type WorktreeRemoveFailed struct{ Err string }
+
+func (Started) event()              {}
+func (TurnEnded) event()            {}
+func (PermissionRequested) event()  {}
+func (PermissionAnswered) event()   {}
+func (FollowUp) event()             {}
+func (Stop) event()                 {}
+func (BackendFailed) event()        {}
+func (WorktreeRemoved) event()      {}
+func (WorktreeRemoveFailed) event() {}
 
 type Effect interface{ effect() }
 
@@ -104,6 +116,8 @@ type AnswerPermission struct {
 // CloseBackend cancels any turn in flight and terminates the agent process.
 type CloseBackend struct{}
 
+// RemoveWorktree removes the run's worktree. The caller applies
+// WorktreeRemoved or WorktreeRemoveFailed right after it.
 type RemoveWorktree struct{}
 
 // Notify delivers the completion webhook for a run that entered State.
@@ -125,8 +139,10 @@ func Launch(prompt string) (Run, []Effect) {
 
 // Apply returns the run after e and the effects to perform. Backend events
 // that arrive after the run left the state they belong to are ignored, so a
-// late report from a closed agent cannot revive a run. Commands that the
-// state rejects return an error wrapping ErrNotAllowed and leave r unchanged.
+// late report from a closed agent cannot revive a run. A removal report for
+// a run that is not stopping, as after a stop of a failed run, changes
+// nothing. Commands that the state rejects return an error wrapping
+// ErrNotAllowed and leave r unchanged.
 func Apply(r Run, e Event) (Run, []Effect, error) {
 	switch e := e.(type) {
 	case Started:
@@ -177,9 +193,9 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 	case Stop:
 		switch r.State {
 		case Queued, Running, AwaitingPermission:
-			return Run{State: Stopped}, []Effect{CloseBackend{}, RemoveWorktree{}, Notify{State: Stopped}}, nil
+			return Run{State: Stopping}, []Effect{CloseBackend{}, RemoveWorktree{}}, nil
 		case Finished:
-			return Run{State: Stopped}, []Effect{RemoveWorktree{}, Notify{State: Stopped}}, nil
+			return Run{State: Stopping}, []Effect{RemoveWorktree{}}, nil
 		default:
 			return r, []Effect{RemoveWorktree{}}, nil
 		}
@@ -189,6 +205,18 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 			return r, nil, nil
 		}
 		return Run{State: Failed, Error: e.Err}, []Effect{CloseBackend{}, Notify{State: Failed}}, nil
+
+	case WorktreeRemoved:
+		if r.State != Stopping {
+			return r, nil, nil
+		}
+		return Run{State: Stopped}, []Effect{Notify{State: Stopped}}, nil
+
+	case WorktreeRemoveFailed:
+		if r.State != Stopping {
+			return r, nil, nil
+		}
+		return Run{State: Failed, Error: e.Err}, []Effect{Notify{State: Failed}}, nil
 	}
 	panic(fmt.Sprintf("lifecycle: unhandled event %T", e))
 }

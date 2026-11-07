@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
@@ -57,8 +58,15 @@ type webhookData struct {
 // the only writer of the run's row, events, and NDJSON log. The fields after
 // inbox belong to that goroutine.
 type actor struct {
-	d     *Daemon
-	id    store.RunID
+	d  *Daemon
+	id store.RunID
+
+	// sweepMu guards sweeper, the newest generation. Only its goroutine
+	// sweeps the worktree after Close, so a generation whose Close outlasted
+	// closeWait cannot end the processes of the one that replaced it.
+	sweepMu sync.Mutex
+	sweeper *generation
+
 	inbox chan func()
 
 	gen *generation
@@ -166,6 +174,12 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	if err != nil {
 		return run, err
 	}
+	return a.applyTo(run, e, edit)
+}
+
+// applyTo applies e to run, the run as this job last left it, stores the
+// result, and performs its effects.
+func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
 	next, effects, err := lifecycle.Apply(run.Lifecycle, e)
 	if err != nil {
 		return run, err
@@ -175,12 +189,28 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	if edit != nil {
 		edit(&run)
 	}
+	// A stopping run moves on when its RemoveWorktree reports back later in
+	// this job, so the store never holds the state.
+	if next.State == lifecycle.Stopping {
+		return run, a.perform(run, effects)
+	}
 	run.UpdatedAt = time.Now().UTC()
-	if err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
+	var status []store.NewEvent
+	if changed {
+		data, err := json.Marshal(statusData{Status: next.State, Error: next.Error})
+		if err != nil {
+			return run, err
+		}
+		status = []store.NewEvent{{Time: run.UpdatedAt, Type: eventStatus, Data: data}}
+	}
+	appended, err := a.d.store.UpdateRun(a.d.writes, run, status...)
+	if err != nil {
 		return run, err
 	}
+	for _, e := range appended {
+		a.appendNDJSON(e)
+	}
 	if changed {
-		a.appendEvent(eventStatus, statusData{Status: next.State, Error: next.Error})
 		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
 	}
 	return run, a.perform(run, effects)
@@ -209,10 +239,8 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 		case lifecycle.CloseBackend:
 			a.closeBackend()
 		case lifecycle.RemoveWorktree:
-			a.awaitClosed()
-			proc.EndUnder(run.Worktree)
-			if err := worktree.Remove(a.d.ctx, run.Repo, run.Worktree); err != nil {
-				errs = append(errs, fmt.Errorf("remove worktree: %w", err))
+			if err := a.removeWorktree(run); err != nil {
+				errs = append(errs, err)
 			}
 		case lifecycle.Notify:
 			a.notify(run, eff.State)
@@ -221,6 +249,31 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Removal runs under a.d.writes, so a stop that races shutdown still removes
+// the worktree. removeTimeout keeps such a removal from holding up Serve
+// indefinitely.
+const removeTimeout = time.Minute
+
+// removeWorktree removes the run's worktree and applies the outcome in the
+// same job, so that no other command acts on the run in between. It returns
+// the removal's error, if any, for the caller of the command.
+func (a *actor) removeWorktree(run store.Run) error {
+	a.awaitClosed()
+	proc.EndUnder(run.Worktree)
+	ctx, cancel := context.WithTimeout(a.d.writes, removeTimeout)
+	err := worktree.Remove(ctx, run.Repo, run.Worktree)
+	cancel()
+	var outcome lifecycle.Event = lifecycle.WorktreeRemoved{}
+	if err != nil {
+		err = fmt.Errorf("remove worktree: %w", err)
+		outcome = lifecycle.WorktreeRemoveFailed{Err: err.Error()}
+	}
+	if _, applyErr := a.applyTo(run, outcome, nil); applyErr != nil {
+		return errors.Join(err, applyErr)
+	}
+	return err
 }
 
 // startBackend creates the worktree on the run's goroutine, so a stop can
@@ -240,6 +293,9 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
 	g.session = newSession(sink{a: a, g: g})
 	a.gen = g
+	a.sweepMu.Lock()
+	a.sweeper = g
+	a.sweepMu.Unlock()
 
 	opts := backend.StartOptions{Dir: run.Worktree, Model: run.Model}
 	if resume {
@@ -253,8 +309,19 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
 		}
-		proc.EndUnder(run.Worktree)
+		a.sweep(g, run.Worktree)
 	})
+}
+
+// sweep ends the processes left in dir unless a newer generation than g has
+// started. It holds sweepMu while it sweeps, so startBackend cannot start the
+// next session until the sweep is over.
+func (a *actor) sweep(g *generation, dir string) {
+	a.sweepMu.Lock()
+	defer a.sweepMu.Unlock()
+	if a.sweeper == g {
+		proc.EndUnder(dir)
+	}
 }
 
 func (a *actor) started(sessionID string, err error) {
@@ -381,7 +448,7 @@ func (a *actor) closeBackend() {
 // proc.Stop sends SIGKILL after its grace period, and a sweep gives up after
 // its last round. A resumed session must not start while the sweep could
 // still end it.
-const closeWait = 15 * time.Second
+var closeWait = 15 * time.Second
 
 // awaitClosed waits for the last closed session's agent to exit and for the
 // sweep of the worktree, so that neither is still running when the worktree
@@ -442,6 +509,10 @@ func (a *actor) appendEvent(typ string, data any) {
 		a.d.log.Error("append event", "run", a.id, "type", typ, "err", err)
 		return
 	}
+	a.appendNDJSON(e)
+}
+
+func (a *actor) appendNDJSON(e store.Event) {
 	if err := a.d.appendLog(e); err != nil {
 		a.d.log.Warn("append to NDJSON log", "run", a.id, "err", err)
 	}

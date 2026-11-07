@@ -162,32 +162,115 @@ func TestApply(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "stop mid-run closes the agent, removes the worktree, and notifies",
+			name:    "stop mid-run closes the agent and removes the worktree",
 			from:    Run{State: Running, Prompts: []string{"p2"}},
 			event:   Stop{},
-			want:    Run{State: Stopped},
-			effects: []Effect{CloseBackend{}, RemoveWorktree{}, Notify{State: Stopped}},
+			want:    Run{State: Stopping},
+			effects: []Effect{CloseBackend{}, RemoveWorktree{}},
 		},
 		{
 			name:    "stop while queued closes the starting agent",
 			from:    Run{State: Queued, Prompts: []string{"p1"}},
 			event:   Stop{},
-			want:    Run{State: Stopped},
-			effects: []Effect{CloseBackend{}, RemoveWorktree{}, Notify{State: Stopped}},
+			want:    Run{State: Stopping},
+			effects: []Effect{CloseBackend{}, RemoveWorktree{}},
 		},
 		{
 			name:    "stop while awaiting permission drops the request",
 			from:    Run{State: AwaitingPermission, Permissions: []Permission{permA}},
 			event:   Stop{},
-			want:    Run{State: Stopped},
-			effects: []Effect{CloseBackend{}, RemoveWorktree{}, Notify{State: Stopped}},
+			want:    Run{State: Stopping},
+			effects: []Effect{CloseBackend{}, RemoveWorktree{}},
 		},
 		{
 			name:    "stop on a finished run releases the worktree",
 			from:    Run{State: Finished},
 			event:   Stop{},
+			want:    Run{State: Stopping},
+			effects: []Effect{RemoveWorktree{}},
+		},
+		{
+			name:    "stop while stopping retries the removal",
+			from:    Run{State: Stopping},
+			event:   Stop{},
+			want:    Run{State: Stopping},
+			effects: []Effect{RemoveWorktree{}},
+		},
+		{
+			name:    "removal while stopping stops the run and notifies",
+			from:    Run{State: Stopping},
+			event:   WorktreeRemoved{},
 			want:    Run{State: Stopped},
-			effects: []Effect{RemoveWorktree{}, Notify{State: Stopped}},
+			effects: []Effect{Notify{State: Stopped}},
+		},
+		{
+			name:    "failed removal while stopping fails the run and notifies",
+			from:    Run{State: Stopping},
+			event:   WorktreeRemoveFailed{Err: "remove worktree: locked"},
+			want:    Run{State: Failed, Error: "remove worktree: locked"},
+			effects: []Effect{Notify{State: Failed}},
+		},
+		{
+			name:  "removal after a stop of a failed run keeps the failure",
+			from:  Run{State: Failed, Error: "boom"},
+			event: WorktreeRemoved{},
+			want:  Run{State: Failed, Error: "boom"},
+		},
+		{
+			name:  "failed removal after a stop of a failed run keeps the failure",
+			from:  Run{State: Failed, Error: "boom"},
+			event: WorktreeRemoveFailed{Err: "remove worktree: locked"},
+			want:  Run{State: Failed, Error: "boom"},
+		},
+		{
+			name:  "removal after a stop of a stopped run changes nothing",
+			from:  Run{State: Stopped},
+			event: WorktreeRemoved{},
+			want:  Run{State: Stopped},
+		},
+		{
+			name:  "failed removal after a stop of a stopped run changes nothing",
+			from:  Run{State: Stopped},
+			event: WorktreeRemoveFailed{Err: "remove worktree: locked"},
+			want:  Run{State: Stopped},
+		},
+		{
+			name:    "follow-up while stopping is rejected",
+			from:    Run{State: Stopping},
+			event:   FollowUp{Prompt: "p2"},
+			want:    Run{State: Stopping},
+			wantErr: true,
+		},
+		{
+			name:    "approve while stopping is rejected",
+			from:    Run{State: Stopping},
+			event:   PermissionAnswered{Approve: true},
+			want:    Run{State: Stopping},
+			wantErr: true,
+		},
+		{
+			name:  "started while stopping is ignored",
+			from:  Run{State: Stopping},
+			event: Started{},
+			want:  Run{State: Stopping},
+		},
+		{
+			name:  "turn end while stopping is ignored",
+			from:  Run{State: Stopping},
+			event: TurnEnded{},
+			want:  Run{State: Stopping},
+		},
+		{
+			name:  "permission request while stopping is ignored",
+			from:  Run{State: Stopping},
+			event: PermissionRequested{Permission: permA},
+			want:  Run{State: Stopping},
+		},
+		{
+			name:  "backend failure while stopping is ignored",
+			from:  Run{State: Stopping},
+			event: BackendFailed{Err: "signal: killed"},
+			want:  Run{State: Stopping},
 		},
 		{
 			name:    "stop on a stopped run only retries worktree cleanup",
@@ -271,6 +354,7 @@ func TestPermissionsNonEmptyExactlyWhenAwaiting(t *testing.T) {
 		FollowUp{Prompt: "p3"},
 		Started{},
 		Stop{},
+		WorktreeRemoved{},
 	}
 	for i, e := range events {
 		var err error
@@ -288,7 +372,7 @@ func TestPermissionsNonEmptyExactlyWhenAwaiting(t *testing.T) {
 }
 
 func TestParseState(t *testing.T) {
-	for _, s := range []string{"queued", "running", "awaiting_permission", "finished", "failed", "stopped"} {
+	for _, s := range []string{"queued", "running", "awaiting_permission", "finished", "failed", "stopping", "stopped"} {
 		if got, err := ParseState(s); err != nil || string(got) != s {
 			t.Errorf("ParseState(%q) = %q, %v", s, got, err)
 		}
