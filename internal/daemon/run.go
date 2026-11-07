@@ -111,7 +111,7 @@ func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
 			done <- result{err: err}
 			return
 		}
-		run, err := a.d.store.GetRun(a.d.ctx, a.id)
+		run, err := a.d.store.GetRun(a.d.writes, a.id)
 		done <- result{run, err}
 	}
 	select {
@@ -132,7 +132,7 @@ func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
 }
 
 func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
-	if err := a.d.store.CreateRun(a.d.ctx, run); err != nil {
+	if err := a.d.store.CreateRun(a.d.writes, run); err != nil {
 		return err
 	}
 	a.appendEvent(eventStatus, statusData{Status: run.Lifecycle.State})
@@ -143,7 +143,7 @@ func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
 // apply moves the run through e, stores the result with edit applied, and
 // performs the transition's effects.
 func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
-	run, err := a.d.store.GetRun(a.d.ctx, a.id)
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
 	if err != nil {
 		return run, err
 	}
@@ -157,7 +157,7 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 		edit(&run)
 	}
 	run.UpdatedAt = time.Now().UTC()
-	if err := a.d.store.UpdateRun(a.d.ctx, run); err != nil {
+	if err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
 		return run, err
 	}
 	if changed {
@@ -298,7 +298,7 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, an
 // stored events, so IDs stay unique across daemon restarts.
 func (a *actor) nextPermissionID() string {
 	if a.perms == 0 {
-		events, err := a.d.store.Events(a.d.ctx, a.id, 0)
+		events, err := a.d.store.Events(a.d.writes, a.id, 0)
 		if err != nil {
 			a.d.log.Error("count permissions", "run", a.id, "err", err)
 		}
@@ -390,7 +390,7 @@ func (a *actor) appendEvent(typ string, data any) {
 		a.d.log.Error("encode event", "run", a.id, "type", typ, "err", err)
 		return
 	}
-	e, err := a.d.store.AppendEvent(a.d.ctx, a.id, time.Now().UTC(), typ, raw)
+	e, err := a.d.store.AppendEvent(a.d.writes, a.id, time.Now().UTC(), typ, raw)
 	if err != nil {
 		a.d.log.Error("append event", "run", a.id, "type", typ, "err", err)
 		return

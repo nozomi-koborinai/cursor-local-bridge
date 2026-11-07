@@ -58,6 +58,10 @@ type Daemon struct {
 	// webhook deliveries live inside it.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// writes carries the run goroutines' store calls. The end of ctx does
+	// not cancel it, so a transition in progress is stored whole: the run's
+	// row together with its events.
+	writes context.Context
 	wg     sync.WaitGroup
 
 	mu     sync.Mutex
@@ -75,6 +79,7 @@ func New(opts Options) *Daemon {
 		log:      cmp.Or(opts.Logger, slog.New(slog.DiscardHandler)),
 		ctx:      ctx,
 		cancel:   cancel,
+		writes:   context.WithoutCancel(ctx),
 		actors:   map[store.RunID]*actor{},
 	}
 }
