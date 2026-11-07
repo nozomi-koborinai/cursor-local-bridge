@@ -232,10 +232,10 @@ func TestStopMidRun(t *testing.T) {
 
 func TestStopWhileStartingClosesTheLateSession(t *testing.T) {
 	entered := make(chan struct{})
-	release := make(chan struct{})
-	agent := &fakeAgent{onStart: func() {
+	agent := &fakeAgent{onStart: func(ctx context.Context, _ *fakeSession) {
 		close(entered)
-		<-release
+		// The start succeeds anyway, as if it finished just as stop came in.
+		<-ctx.Done()
 	}}
 	h := newHarness(t, agent)
 
@@ -244,8 +244,11 @@ func TestStopWhileStartingClosesTheLateSession(t *testing.T) {
 	if stopped := h.must(ipc.Request{Method: ipc.MethodStop, RunID: run.ID}); stopped.Status != "stopped" {
 		t.Fatalf("status = %s, want stopped", stopped.Status)
 	}
-	close(release)
-	waitClosed(t, h.agent.session(0))
+	select {
+	case <-h.agent.session(0).closed:
+	default:
+		t.Error("stop returned before the starting session was closed")
+	}
 
 	again := h.must(ipc.Request{Method: ipc.MethodStop, RunID: run.ID})
 	if again.Status != "stopped" || again.SessionID != "" {
@@ -253,6 +256,66 @@ func TestStopWhileStartingClosesTheLateSession(t *testing.T) {
 	}
 	if got := h.agent.session(0).sentPrompts(); len(got) != 0 {
 		t.Errorf("prompts sent to the late session: %v", got)
+	}
+}
+
+func TestStopRemovesTheWorktreeAfterTheAgentExits(t *testing.T) {
+	duringClose := make(chan error, 1)
+	agent := &fakeAgent{
+		onPrompt: func(ctx context.Context, _ *fakeSession, _ string) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		onClose: func(s *fakeSession) {
+			time.Sleep(100 * time.Millisecond)
+			_, err := os.Stat(s.startOptions().Dir)
+			duringClose <- err
+		},
+	}
+	h := newHarness(t, agent)
+
+	run := h.launch("work")
+	h.waitStatus(run.ID, "running")
+	h.must(ipc.Request{Method: ipc.MethodStop, RunID: run.ID})
+	select {
+	case <-h.agent.session(0).closed:
+	default:
+		t.Error("stop returned before the agent exited")
+	}
+	if err := <-duringClose; err != nil {
+		t.Errorf("worktree while the agent was exiting: %v, want it still there", err)
+	}
+	if _, err := os.Stat(run.Worktree); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("worktree after stop: %v, want it gone", err)
+	}
+}
+
+func TestAResumedSessionStartsAfterThePreviousAgentExits(t *testing.T) {
+	overlapped := make(chan bool, 1)
+	agent := &fakeAgent{onClose: func(s *fakeSession) {
+		if s.n == 1 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}}
+	agent.onStart = func(_ context.Context, s *fakeSession) {
+		if s.n != 2 {
+			return
+		}
+		select {
+		case <-agent.session(0).closed:
+			overlapped <- false
+		default:
+			overlapped <- true
+		}
+	}
+	h := newHarness(t, agent)
+
+	run := h.launch("hello")
+	h.waitStatus(run.ID, "finished")
+	h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "again"})
+	h.waitStatus(run.ID, "finished")
+	if <-overlapped {
+		t.Error("the resumed session started while the previous agent was still exiting")
 	}
 }
 
@@ -647,8 +710,9 @@ func (h *harness) waitNDJSONMatchesLogs(id string) {
 // resumed ID. Prompts reply "echo: <prompt>" unless onPrompt is set.
 type fakeAgent struct {
 	startErr error
-	onStart  func()
+	onStart  func(ctx context.Context, s *fakeSession)
 	onPrompt func(ctx context.Context, s *fakeSession, prompt string) error
+	onClose  func(s *fakeSession)
 
 	mu       sync.Mutex
 	sessions []*fakeSession
@@ -686,12 +750,12 @@ type fakeSession struct {
 	prompts []string
 }
 
-func (s *fakeSession) Start(_ context.Context, opts backend.StartOptions) (string, error) {
+func (s *fakeSession) Start(ctx context.Context, opts backend.StartOptions) (string, error) {
 	s.mu.Lock()
 	s.opts = opts
 	s.mu.Unlock()
 	if s.agent.onStart != nil {
-		s.agent.onStart()
+		s.agent.onStart(ctx, s)
 	}
 	if s.agent.startErr != nil {
 		return "", s.agent.startErr
@@ -712,7 +776,11 @@ func (s *fakeSession) Prompt(ctx context.Context, text string) error {
 	return echo(ctx, s, text)
 }
 
+// Close closes s.closed when it returns.
 func (s *fakeSession) Close() error {
+	if s.agent.onClose != nil {
+		s.agent.onClose(s)
+	}
 	s.closeOnce.Do(func() { close(s.closed) })
 	return nil
 }

@@ -52,8 +52,11 @@ type actor struct {
 	id    store.RunID
 	inbox chan func()
 
-	gen   *generation
-	perms int
+	gen *generation
+	// closing is the last closed generation. Its agent may still be
+	// shutting down.
+	closing *generation
+	perms   int
 }
 
 // generation is one agent session of a run, from StartBackend to
@@ -63,6 +66,8 @@ type generation struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	session Session
+	// closed is closed once the session's Close has returned.
+	closed  chan struct{}
 	turn    strings.Builder
 	answers map[string]chan<- bool
 }
@@ -187,6 +192,7 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 		case lifecycle.CloseBackend:
 			a.closeBackend()
 		case lifecycle.RemoveWorktree:
+			a.awaitClosed()
 			if err := worktree.Remove(a.d.ctx, run.Repo, run.Worktree); err != nil {
 				errs = append(errs, fmt.Errorf("remove worktree: %w", err))
 			}
@@ -203,6 +209,7 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 // never interleave with it, then starts the session in the background. The
 // goroutine that starts the session also closes it when its generation ends.
 func (a *actor) startBackend(run store.Run, resume bool) {
+	a.awaitClosed()
 	if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
 		a.fail(fmt.Errorf("create worktree: %w", err))
 		return
@@ -213,7 +220,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		return
 	}
 	ctx, cancel := context.WithCancel(a.d.ctx)
-	g := &generation{ctx: ctx, cancel: cancel, answers: map[string]chan<- bool{}}
+	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
 	g.session = newSession(sink{a: a, g: g})
 	a.gen = g
 
@@ -222,6 +229,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		opts.ResumeSessionID = run.SessionID
 	}
 	a.d.wg.Go(func() {
+		defer close(g.closed)
 		sessionID, err := g.session.Start(ctx, opts)
 		a.post(func() { a.started(g, sessionID, err) })
 		<-ctx.Done()
@@ -317,7 +325,31 @@ func (a *actor) answerPermission(eff lifecycle.AnswerPermission) {
 func (a *actor) closeBackend() {
 	if a.gen != nil {
 		a.gen.cancel()
+		a.closing = a.gen
 		a.gen = nil
+	}
+}
+
+// closeWait bounds the wait for a closed session's agent to exit. Closing an
+// agent takes at most a few seconds unless its backend ignores cancellation.
+const closeWait = 10 * time.Second
+
+// awaitClosed waits until the agent of the last closed session has exited,
+// so that no agent is still running in the worktree when it is removed or
+// when a resumed session starts there.
+func (a *actor) awaitClosed() {
+	g := a.closing
+	if g == nil {
+		return
+	}
+	a.closing = nil
+	timer := time.NewTimer(closeWait)
+	defer timer.Stop()
+	select {
+	case <-g.closed:
+	case <-timer.C:
+		a.d.log.Warn("agent session still closing; continuing", "run", a.id)
+	case <-a.d.ctx.Done():
 	}
 }
 
