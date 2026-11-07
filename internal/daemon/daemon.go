@@ -51,8 +51,13 @@ type Daemon struct {
 	webhook  *webhook.Sender
 	log      *slog.Logger
 
+	// ctx ends when Serve returns. Run goroutines, agent sessions, and
+	// webhook deliveries live inside it.
 	ctx    context.Context
 	cancel context.CancelFunc
+	// writes carries the run goroutines' store calls. The end of ctx does
+	// not cancel it, so a transition in progress writes both the run's row
+	// and its events.
 	writes context.Context
 	wg     sync.WaitGroup
 
@@ -262,6 +267,8 @@ func (d *Daemon) actor(id store.RunID) *actor {
 	return a
 }
 
+// rewriteLog runs on the run's goroutine, or under d.mu when the run has
+// none, so that no append races the rewrite.
 func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 	d.mu.Lock()
 	a, ok := d.actors[id]

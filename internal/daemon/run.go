@@ -43,16 +43,23 @@ type webhookData struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// actor owns one run. Its goroutine runs every function sent to inbox and is
+// the only writer of the run's row, events, and NDJSON log. The fields after
+// inbox belong to that goroutine.
 type actor struct {
 	d     *Daemon
 	id    store.RunID
 	inbox chan func()
 
-	gen     *generation
+	gen *generation
+	// closing is the last closed generation. Its agent may still be
+	// shutting down.
 	closing *generation
 	perms   int
 }
 
+// generation is one agent session of a run. Everything a session reports
+// carries its generation, so reports from a closed session are dropped.
 type generation struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -200,6 +207,8 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		return
 	}
 	ctx, cancel := context.WithCancel(a.d.ctx)
+// startBackend creates the worktree on the run's goroutine, so a stop can
+// never interleave with it, then starts the session in the background.
 	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
 	g.session = newSession(sink{a: a, g: g})
 	a.gen = g
@@ -286,6 +295,8 @@ func (a *actor) nextPermissionID() string {
 			}
 		}
 	}
+// nextPermissionID counts from the stored events, so IDs stay unique across
+// daemon restarts.
 	a.perms++
 	return fmt.Sprintf("perm-%d", a.perms)
 }
@@ -320,8 +331,13 @@ func (a *actor) awaitClosed() {
 	defer timer.Stop()
 	select {
 	case <-g.closed:
+// closeWait exceeds the longest Close, which proc.Stop bounds by sending
+// SIGKILL after its grace period.
 	case <-timer.C:
 		a.d.log.Warn("agent session still closing; continuing", "run", a.id)
+// awaitClosed waits for the last closed session's agent to exit, so that no
+// agent is still running in the worktree when it is removed or when a
+// resumed session starts there.
 	case <-a.d.ctx.Done():
 	}
 }

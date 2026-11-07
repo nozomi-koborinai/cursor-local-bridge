@@ -242,6 +242,8 @@ func migrate(db *sql.DB) error {
 		}
 		names = append(names, entry.Name())
 	}
+	// user_version counts applied files in lexical order, not the numeric
+	// prefix in their names, so a renamed prefix cannot skip a file.
 	var current int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
