@@ -1,0 +1,23 @@
+version: "2"
+
+run:
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - nolintlint
+    - unconvert
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/nozomi-koborinai/cursor-local-bridge
