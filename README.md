@@ -149,12 +149,13 @@ A command in a state that does not allow it fails with a `conflict` error and ch
 
 The commit that `clb stop` makes includes untracked files but not ignored ones. It skips the repository's commit hooks and commit signing, because the daemon has no terminal to answer them. If your git config has no `user.name` or `user.email`, the commit's author is `clb <clb@localhost>`. When the commit or the removal fails, `error` is `remove worktree: ` followed by git's message, and `clb stop` prints that message with the `internal` code.
 
-When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. It finds them in two ways:
+When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. It finds them in three ways:
 
-- It adds a `CLB_PROC_TOKEN` variable to the agent's environment and ends the processes that inherited it. With the `print` backend, this happens after each prompt.
+- It adds a `CLB_PROC_TOKEN` variable to the agent's environment and ends the processes that inherited it. With the `print` backend, this happens after each prompt. macOS 26 can hide one process's environment from another, even for the same user, and then this way finds nothing.
+- On macOS, it watches the agent process start other processes, and those start more, and ends every one it saw start. When one of them exits, it also takes the processes left in that one's process group. This way does not read environments. It can miss a process that left its parent's process group if the parent exited right after starting it.
 - It ends your processes whose working directory is inside the run's worktree. The Cursor CLI starts terminal commands with an empty environment, so the token does not reach them. This happens after the agent process closes, when the run finishes, fails, or stops, or when the daemon shuts down. It happens again just before `clb stop` removes the worktree.
 
-The second way also ends a process of yours that is not the agent's, such as a shell that you opened in the worktree. `clb` sends SIGTERM, then SIGKILL to any that still run 1 second later. It never matches a working directory outside the run's worktree.
+The third way also ends a process of yours that is not the agent's, such as a shell that you opened in the worktree. `clb` sends SIGTERM, then SIGKILL to any that still run 1 second later. It never matches a working directory outside the run's worktree.
 
 If the daemon stops while runs are active, it marks those runs `failed` when it starts again. First it ends the processes whose working directory is inside those runs' worktrees, such as a command that the agent left running.
 
@@ -358,11 +359,13 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 
 Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered these parts of the `acp` backend: streamed events, a file edit, an approved and a denied permission request, a follow-up that resumes the session with `session/load`, `--model`, the error for an unknown model, the newlines in `summary`, and a stop during a turn. They also covered the `print` backend with `trustWorktree`, for a launch and a follow-up. These parts are tested against the fake agent only:
 
-- Ending the background commands of the real Cursor CLI by their working directory. The fake agent starts its background command the way the real CLI does, with an empty environment, in its own session, and in the worktree. The macOS code that reads another process's working directory runs in the macOS CI job.
+- Ending the background commands of the real Cursor CLI by their working directory. The fake agent starts its background command the way the real CLI does, with an empty environment, in its own session, and in the worktree. The macOS code that reads another process's working directory runs in the macOS CI jobs.
+- Watching the real Cursor CLI's processes start on macOS. The macOS CI jobs cover a `node` process that starts a detached command with an empty environment, as the CLI's runtime does, and a shell that starts a background command and exits at once.
+- Hidden environments. GitHub's macOS runners have System Integrity Protection off and show other processes' environments. Tests whose stray process has an empty environment stand in for a system that hides them.
 
 Other gaps:
 
-- A command that the agent starts outside the worktree with an empty environment keeps running after the run ends.
+- On Linux, a command that the agent starts outside the worktree with an empty environment keeps running after the run ends. On macOS, such a command keeps running only if it also left its parent's process group and the parent exited right after starting it.
 - The Cursor CLI creates a folder in `~/.cursor/projects` for each run's worktree, named after the worktree path, such as `~/.cursor/projects/<path>-worktrees-run-3f9a2c7d1e0b`. `clb` does not remove these folders.
 - When `agent -p --resume` gets a chat ID that the CLI does not know, it starts a new chat and reports no error. A follow-up on a `print` run then reaches an agent without the earlier conversation, and `clb` cannot tell.
 - A webhook that is still being delivered when the daemon stops is not retried after a restart.

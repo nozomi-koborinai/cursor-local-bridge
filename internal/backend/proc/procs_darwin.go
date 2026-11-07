@@ -26,6 +26,19 @@ func userPids() []int {
 	return pids
 }
 
+// group returns the pids of the processes in process group pgid.
+func group(pgid int) []int {
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	if err != nil {
+		return nil
+	}
+	pids := make([]int, len(procs))
+	for i, kp := range procs {
+		pids[i] = int(kp.Proc.P_pid)
+	}
+	return pids
+}
+
 func environOf(pid int) ([]byte, error) {
 	args, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
@@ -58,26 +71,72 @@ func environ(args []byte) []byte {
 // The PROC_PIDVNODEPATHINFO flavor of proc_pidinfo fills a struct
 // proc_vnodepathinfo from <sys/proc_info.h>: the working directory and then
 // the root directory, each a 152-byte vnode_info followed by a NUL-terminated
-// path of up to 1024 bytes.
+// path of up to 1024 bytes. The PROC_PIDUNIQIDENTIFIERINFO flavor fills a
+// 56-byte struct proc_uniqidentifierinfo, which holds the process's unique ID
+// at offset 16 and its parent's at offset 24.
 const (
-	procInfoCallPidInfo  = 2
-	procPidVnodePathInfo = 9
-	vnodeInfoSize        = 152
-	maxPathLen           = 1024
+	procInfoCallListPids      = 1
+	procInfoCallPidInfo       = 2
+	procPPIDOnly              = 6
+	procPidVnodePathInfo      = 9
+	procPidUniqIdentifierInfo = 17
+	vnodeInfoSize             = 152
+	maxPathLen                = 1024
+	uniqIdentifierInfoSize    = 56
 )
 
-// cwdOf calls proc_info, the system call behind libproc's proc_pidinfo.
 func cwdOf(pid int) (string, error) {
 	var info [2 * (vnodeInfoSize + maxPathLen)]byte
-	//nolint:staticcheck // x/sys/unix wraps no libSystem call for proc_info, and this package does not use cgo.
-	n, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallPidInfo, uintptr(pid), procPidVnodePathInfo, 0,
-		uintptr(unsafe.Pointer(&info[0])), uintptr(len(info)))
-	if errno != 0 {
-		return "", errno
-	}
-	if n != uintptr(len(info)) {
-		return "", fmt.Errorf("proc_info filled %d bytes, want %d", n, len(info))
+	if err := pidInfo(pid, procPidVnodePathInfo, info[:]); err != nil {
+		return "", err
 	}
 	path, _, _ := bytes.Cut(info[vnodeInfoSize:vnodeInfoSize+maxPathLen], []byte{0})
 	return string(path), nil
+}
+
+// identity returns the unique IDs of pid and of its parent, which the kernel
+// never reuses. Once the parent exits, the parent ID it reports is launchd's.
+func identity(pid int) (id, parent uint64, err error) {
+	var info [uniqIdentifierInfoSize]byte
+	if err := pidInfo(pid, procPidUniqIdentifierInfo, info[:]); err != nil {
+		return 0, 0, err
+	}
+	return binary.NativeEndian.Uint64(info[16:]), binary.NativeEndian.Uint64(info[24:]), nil
+}
+
+// pidInfo calls proc_info, the system call behind libproc's proc_pidinfo.
+func pidInfo(pid, flavor int, info []byte) error {
+	//nolint:staticcheck // x/sys/unix wraps no libSystem call for proc_info, and this package does not use cgo.
+	n, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallPidInfo, uintptr(pid), uintptr(flavor), 0,
+		uintptr(unsafe.Pointer(&info[0])), uintptr(len(info)))
+	if errno != 0 {
+		return errno
+	}
+	if n != uintptr(len(info)) {
+		return fmt.Errorf("proc_info filled %d bytes, want %d", n, len(info))
+	}
+	return nil
+}
+
+// children returns the pids of the processes whose parent is pid. It calls
+// proc_info the way libproc's proc_listpids does, which fills the buffer
+// with pids and returns the number of bytes it filled.
+func children(pid int) ([]int, error) {
+	buf := make([]int32, 16)
+	for {
+		//nolint:staticcheck // x/sys/unix wraps no libSystem call for proc_info, and this package does not use cgo.
+		n, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallListPids, procPPIDOnly, uintptr(pid), 0,
+			uintptr(unsafe.Pointer(&buf[0])), uintptr(4*len(buf)))
+		if errno != 0 {
+			return nil, errno
+		}
+		if count := int(n) / 4; count < len(buf) {
+			pids := make([]int, count)
+			for i, child := range buf[:count] {
+				pids[i] = int(child)
+			}
+			return pids, nil
+		}
+		buf = make([]int32, 2*len(buf))
+	}
 }

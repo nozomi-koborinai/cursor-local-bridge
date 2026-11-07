@@ -1,7 +1,10 @@
 // Package proc runs an agent CLI process in its own process group, so that
 // stopping it also stops the processes it spawned, and keeps the beginning of
-// its stderr for error messages. A token in the process's environment marks
-// the descendants that leave the group, so that stopping it ends them too.
+// its stderr for error messages. Stopping it also ends the descendants that
+// leave the group. A token in the process's environment marks them where
+// environments can be read. macOS can hide environments even from their own
+// user, so there the package also watches the process and each descendant for
+// forks.
 // EndUnder ends the processes working in a directory, which also finds the
 // descendants that cleared their environment.
 package proc
@@ -44,6 +47,7 @@ type Process struct {
 
 	cmd      *exec.Cmd
 	mark     string
+	family   *family
 	stderr   head
 	done     chan struct{}
 	err      error
@@ -74,6 +78,8 @@ func Start(cmd *exec.Cmd) (*Process, error) {
 		_ = r.Close()
 		return nil, err
 	}
+	// Before Wait can reap the process and free its pid for reuse.
+	p.family = watchFamily(cmd.Process.Pid)
 	go func() {
 		p.err = cmd.Wait()
 		close(p.done)
@@ -114,8 +120,14 @@ func (p *Process) Explain(err error) error {
 // exit, then sends SIGKILL to the group so that children which ignored
 // SIGTERM end too. Then it ends the descendants that left the group, such as
 // a command the agent ran in its own session. It finds them by the token in
-// their environment, so it misses a descendant that dropped the token. It
-// returns after the process has exited and is safe to call more than once.
+// their environment, so on Linux it misses a descendant that dropped the
+// token. macOS can hide environments, so there it also ends the descendants
+// it saw being born, watching the process and each descendant for forks from
+// Start on, and the processes left in a group one of them led. There it
+// misses a descendant only when the token is not visible, the descendant
+// left its parent's group, and the parent exited before the watch saw the
+// fork. It returns after the process has exited and is safe to call more
+// than once.
 func (p *Process) Stop() {
 	p.stopOnce.Do(func() {
 		pgid := p.cmd.Process.Pid
@@ -127,9 +139,13 @@ func (p *Process) Stop() {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		<-p.done
 		reap(func(pid int) bool {
+			if p.family.owns(pid) {
+				return true
+			}
 			env, err := environOf(pid)
 			return err == nil && hasEntry(env, p.mark)
 		})
+		p.family.close()
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,60 +17,79 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if env, ok := os.LookupEnv("PROC_TEST_DETACH"); ok {
-		detach(env)
+	if how, ok := os.LookupEnv("PROC_TEST_DETACH"); ok {
+		detach(how)
 	}
 	os.Exit(m.Run())
 }
 
 // detach starts a sleep in a new session, prints its pid, and exits, which
-// leaves the sleep outside the process group that Stop kills. With env
+// leaves the sleep outside the process group that Stop kills. With how
 // "empty" the sleep gets an empty environment, the way the Cursor CLI runs
-// terminal commands.
-func detach(env string) {
+// terminal commands. With how "shell" a shell in a new session with an empty
+// environment starts the sleep, prints its pid, and exits, so the sleep's
+// parent is gone right away.
+func detach(how string) {
 	cmd := exec.Command("sleep", "120")
+	if how == "shell" {
+		cmd = exec.Command("sh", "-c", "sleep 120 >/dev/null & echo $!")
+		cmd.Stdout = os.Stdout
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if env == "empty" {
+	if how != "inherit" {
 		cmd.Env = []string{}
 	}
-	if err := cmd.Start(); err != nil {
+	err := cmd.Start()
+	if err == nil && how == "shell" {
+		err = cmd.Wait()
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(cmd.Process.Pid)
+	if how != "shell" {
+		fmt.Println(cmd.Process.Pid)
+	}
 	os.Exit(0)
 }
 
 func TestStopEndsDescendantsThatLeftTheGroup(t *testing.T) {
-	dir := t.TempDir()
-	p, grandchild := startDetaching(t, dir, "inherit")
-	_, otherGrandchild := startDetaching(t, dir, "inherit")
+	for _, how := range []string{"inherit", "empty", "shell"} {
+		t.Run(how, func(t *testing.T) {
+			if how != "inherit" && runtime.GOOS == "linux" {
+				t.Skip("Linux finds the descendants that left the group only by the token in their environment")
+			}
+			dir := t.TempDir()
+			p, grandchild := startDetaching(t, dir, how)
+			_, otherGrandchild := startDetaching(t, dir, how)
 
-	bystander := exec.Command("sleep", "120")
-	bystander.Dir = dir
-	if err := bystander.Start(); err != nil {
-		t.Fatal(err)
-	}
-	ended := make(chan struct{})
-	go func() {
-		_ = bystander.Wait()
-		close(ended)
-	}()
-	t.Cleanup(func() {
-		_ = bystander.Process.Kill()
-		<-ended
-	})
+			bystander := exec.Command("sleep", "120")
+			bystander.Dir = dir
+			if err := bystander.Start(); err != nil {
+				t.Fatal(err)
+			}
+			ended := make(chan struct{})
+			go func() {
+				_ = bystander.Wait()
+				close(ended)
+			}()
+			t.Cleanup(func() {
+				_ = bystander.Process.Kill()
+				<-ended
+			})
 
-	p.Stop()
+			p.Stop()
 
-	waitGone(t, grandchild, "a sleep the stopped process started in a new session")
-	select {
-	case <-ended:
-		t.Error("Stop ended a sleep that the test started itself in the same directory")
-	case <-time.After(200 * time.Millisecond):
-	}
-	if err := syscall.Kill(otherGrandchild, 0); err != nil {
-		t.Errorf("Stop ended process %d, which another Process left running: kill(0) = %v", otherGrandchild, err)
+			waitGone(t, grandchild, "a sleep the stopped process started in a new session")
+			select {
+			case <-ended:
+				t.Error("Stop ended a sleep that the test started itself in the same directory")
+			case <-time.After(200 * time.Millisecond):
+			}
+			if err := syscall.Kill(otherGrandchild, 0); err != nil {
+				t.Errorf("Stop ended process %d, which another Process left running: kill(0) = %v", otherGrandchild, err)
+			}
+		})
 	}
 }
 
@@ -225,9 +245,8 @@ func waitGone(t *testing.T, pid int, what string) {
 }
 
 // startDetaching returns the Process of an exited detach helper and the pid
-// of the sleep it left running in dir, with the helper's environment or, when
-// env is "empty", none.
-func startDetaching(t *testing.T, dir, env string) (*Process, int) {
+// of the sleep it left running in dir the way how names.
+func startDetaching(t *testing.T, dir, how string) (*Process, int) {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -237,7 +256,7 @@ func startDetaching(t *testing.T, dir, env string) (*Process, int) {
 	// one, which would start helpers of its own.
 	cmd := exec.Command(self, "-test.run=^$")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH="+env)
+	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH="+how)
 	p, err := Start(cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -254,6 +273,9 @@ func startDetaching(t *testing.T, dir, env string) (*Process, int) {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("detach helper left no running sleep: kill(%d, 0) = %v", pid, err)
 	}
 	return p, pid
 }
