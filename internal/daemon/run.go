@@ -92,6 +92,18 @@ func (a *actor) post(f func()) bool {
 	}
 }
 
+// postFrom queues a report from g and gives up once g is closed. The run's
+// goroutine would drop the report, and while it waits for g's agent to exit
+// it is not reading inbox.
+func (a *actor) postFrom(g *generation, f func()) bool {
+	select {
+	case a.inbox <- f:
+		return true
+	case <-g.ctx.Done():
+		return false
+	}
+}
+
 var errStopping = errors.New("the daemon is shutting down")
 
 func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
@@ -195,6 +207,8 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 	return errors.Join(errs...)
 }
 
+// startBackend creates the worktree on the run's goroutine, so a stop can
+// never interleave with it, then starts the session in the background.
 func (a *actor) startBackend(run store.Run, resume bool) {
 	a.awaitClosed()
 	if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
@@ -220,7 +234,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.d.wg.Go(func() {
 		defer close(g.closed)
 		sessionID, err := g.session.Start(ctx, opts)
-		a.post(func() { a.started(g, sessionID, err) })
+		a.postFrom(g, func() { a.started(g, sessionID, err) })
 		<-ctx.Done()
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
@@ -245,7 +259,7 @@ func (a *actor) sendPrompt(prompt string) {
 	g.turn.Reset()
 	a.d.wg.Go(func() {
 		err := g.session.Prompt(g.ctx, prompt)
-		a.post(func() { a.promptDone(g, err) })
+		a.postFrom(g, func() { a.promptDone(g, err) })
 	})
 }
 
@@ -283,6 +297,8 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, an
 	a.appendEvent(eventPermissionRequested, p)
 }
 
+// nextPermissionID counts from the stored events, so IDs stay unique across
+// daemon restarts.
 func (a *actor) nextPermissionID() string {
 	if a.perms == 0 {
 		events, err := a.d.store.Events(a.d.writes, a.id, 0)
@@ -319,8 +335,13 @@ func (a *actor) closeBackend() {
 	}
 }
 
+// closeWait exceeds the longest Close, which proc.Stop bounds by sending
+// SIGKILL after its grace period.
 const closeWait = 10 * time.Second
 
+// awaitClosed waits for the last closed session's agent to exit, so that no
+// agent is still running in the worktree when it is removed or when a
+// resumed session starts there.
 func (a *actor) awaitClosed() {
 	g := a.closing
 	if g == nil {
@@ -393,13 +414,15 @@ type sink struct {
 }
 
 func (s sink) Event(e backend.Event) {
-	s.a.post(func() { s.a.agentEvent(s.g, e) })
+	s.a.postFrom(s.g, func() { s.a.agentEvent(s.g, e) })
 }
+
+var errSessionClosed = errors.New("the agent session was closed")
 
 func (s sink) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
 	answer := make(chan bool, 1)
-	if !s.a.post(func() { s.a.permissionAsked(s.g, req, answer) }) {
-		return false, errStopping
+	if !s.a.postFrom(s.g, func() { s.a.permissionAsked(s.g, req, answer) }) {
+		return false, errSessionClosed
 	}
 	select {
 	case approve := <-answer:
@@ -407,6 +430,6 @@ func (s sink) Permission(ctx context.Context, req backend.PermissionRequest) (bo
 	case <-ctx.Done():
 		return false, ctx.Err()
 	case <-s.g.ctx.Done():
-		return false, errors.New("the agent session was closed")
+		return false, errSessionClosed
 	}
 }

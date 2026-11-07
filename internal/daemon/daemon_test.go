@@ -258,6 +258,28 @@ func TestStopWhileStartingClosesTheLateSession(t *testing.T) {
 	}
 }
 
+func TestStopIsNotHeldUpByAFloodingSession(t *testing.T) {
+	flooding := make(chan struct{})
+	agent := &fakeAgent{onStart: func(ctx context.Context, s *fakeSession) {
+		s.sink.Event(chunk("x"))
+		close(flooding)
+		for ctx.Err() == nil {
+			s.sink.Event(chunk("x"))
+		}
+	}}
+	h := newHarness(t, agent)
+
+	run := h.launch("hello")
+	<-flooding
+	began := time.Now()
+	if stopped := h.must(ipc.Request{Method: ipc.MethodStop, RunID: run.ID}); stopped.Status != "stopped" {
+		t.Fatalf("status = %s, want stopped", stopped.Status)
+	}
+	if took := time.Since(began); took > 5*time.Second {
+		t.Errorf("stop took %v while the session flooded the run with events", took)
+	}
+}
+
 func TestStopRemovesTheWorktreeAfterTheAgentExits(t *testing.T) {
 	duringClose := make(chan error, 1)
 	agent := &fakeAgent{
