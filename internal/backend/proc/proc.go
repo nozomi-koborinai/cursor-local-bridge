@@ -18,6 +18,10 @@ const (
 	stopGrace = 3 * time.Second
 )
 
+// StderrWait is how long Wait keeps reading stderr after the process exits,
+// in case a child that outlives it still holds stderr open.
+const StderrWait = time.Second
+
 type Process struct {
 	// Stdout is the read end of the command's stdout. The caller reads and
 	// closes it. Unlike exec.Cmd.StdoutPipe, it stays readable after the
@@ -42,9 +46,7 @@ func Start(cmd *exec.Cmd) (*Process, error) {
 	cmd.Stdout = w
 	cmd.Stderr = &p.stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// A child that outlives the process can hold stderr open; stop waiting
-	// for it after this long.
-	cmd.WaitDelay = time.Second
+	cmd.WaitDelay = StderrWait
 	err = cmd.Start()
 	_ = w.Close()
 	if err != nil {

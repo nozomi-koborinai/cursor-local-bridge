@@ -25,9 +25,7 @@ const (
 	cursorLogin      = "cursor_login"
 	authRequiredCode = -32000
 	cancelWait       = time.Second
-	// exitGrace covers proc's wait of up to a second for stderr after the
-	// process exits.
-	exitGrace = 2 * time.Second
+	exitGrace        = proc.StderrWait + time.Second
 )
 
 // authTimeout bounds authenticate, which the CLI never answers when it has no
