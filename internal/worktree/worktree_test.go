@@ -230,8 +230,49 @@ func TestAddErrorIncludesGitOutput(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "worktree add") || !strings.Contains(msg, "not-a-ref") {
+	if !strings.Contains(msg, "does not name a commit") || !strings.Contains(msg, "not-a-ref") {
 		t.Fatalf("err = %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("worktree path stat = %v, want it absent", statErr)
+	}
+}
+
+func TestResolveCommit(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	for _, ref := range []string{"HEAD", "main"} {
+		got, err := ResolveCommit(ctx, repo, ref)
+		if err != nil {
+			t.Fatalf("ResolveCommit(%q): %v", ref, err)
+		}
+		if got != head {
+			t.Fatalf("ResolveCommit(%q) = %s, want %s", ref, got, head)
+		}
+	}
+}
+
+func TestAddRejectsABaseRefThatIsNotACommit(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := t.Context()
+	for _, tc := range []struct{ ref, branch string }{
+		{"--detach", "clb/detach"},
+		{"-b", "clb/dash-b"},
+	} {
+		t.Run(tc.ref, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wt")
+			err := Add(ctx, repo, path, tc.branch, tc.ref)
+			if err == nil || !strings.Contains(err.Error(), "does not name a commit") {
+				t.Fatalf("Add(%q) = %v, want an unknown commit", tc.ref, err)
+			}
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("worktree path stat = %v, want it absent", statErr)
+			}
+			cmd := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+tc.branch)
+			if cmd.Run() == nil {
+				t.Fatalf("branch %s was created", tc.branch)
+			}
+		})
 	}
 }
 

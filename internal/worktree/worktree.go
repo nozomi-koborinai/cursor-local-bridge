@@ -22,7 +22,9 @@ func Root(ctx context.Context, dir string) (string, error) {
 }
 
 // Add creates a worktree of repo at path on a new branch that starts at
-// baseRef. If path is already a worktree of repo, Add does nothing. If the
+// baseRef. baseRef must name a commit. Add passes that commit to git, not
+// the caller's string, so a string that starts with '-' cannot be parsed as
+// a flag. If path is already a worktree of repo, Add does nothing. If the
 // branch exists from an earlier attempt, Add checks it out instead.
 func Add(ctx context.Context, repo, path, branch, baseRef string) error {
 	registered, err := isWorktree(ctx, repo, path)
@@ -32,19 +34,41 @@ func Add(ctx context.Context, repo, path, branch, baseRef string) error {
 	if registered {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	exists, err := branchExists(ctx, repo, branch)
 	if err != nil {
+		return err
+	}
+	var commit string
+	if !exists {
+		commit, err = ResolveCommit(ctx, repo, baseRef)
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	if exists {
 		_, err = git(ctx, repo, "worktree", "add", path, branch)
 		return err
 	}
-	_, err = git(ctx, repo, "worktree", "add", "-b", branch, path, baseRef)
+	_, err = git(ctx, repo, "worktree", "add", "-b", branch, path, commit)
 	return err
+}
+
+// ResolveCommit returns the commit hash ref names. ref is one argument after
+// --end-of-options, so a value that starts with '-' is a revision, not a flag.
+func ResolveCommit(ctx context.Context, repo, ref string) (string, error) {
+	spec := ref + "^{commit}"
+	out, err := git(ctx, repo, "rev-parse", "--verify", "--quiet", "--end-of-options", spec)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", fmt.Errorf("%s does not name a commit: %w", ref, err)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // Remove deletes the worktree at path, discarding uncommitted changes, and

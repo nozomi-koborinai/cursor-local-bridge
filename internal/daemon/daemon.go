@@ -172,6 +172,13 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	if err != nil {
 		return store.Run{}, invalid(err.Error())
 	}
+	ref := cmp.Or(req.Ref, "HEAD")
+	if strings.HasPrefix(ref, "-") {
+		return store.Run{}, invalid(fmt.Sprintf("ref %q starts with %q", ref, "-"))
+	}
+	if _, err := worktree.ResolveCommit(ctx, repo, ref); err != nil {
+		return store.Run{}, invalid(fmt.Sprintf("ref %q does not name a commit", ref))
+	}
 	kind := d.cfg.Backend
 	if req.Backend != "" {
 		if kind, err = backend.ParseKind(req.Backend); err != nil {
@@ -193,7 +200,7 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	run := store.Run{
 		ID:        id,
 		Repo:      repo,
-		BaseRef:   cmp.Or(req.Ref, "HEAD"),
+		BaseRef:   ref,
 		Branch:    "clb/" + string(id),
 		Worktree:  filepath.Join(d.cfg.WorktreeDir, string(id)),
 		Backend:   kind,

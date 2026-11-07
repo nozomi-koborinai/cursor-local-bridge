@@ -660,14 +660,6 @@ func TestBackendErrorsFailTheRun(t *testing.T) {
 			t.Errorf("follow-up on a failed run: %v, want code %s", err, ipc.CodeConflict)
 		}
 	})
-	t.Run("worktree", func(t *testing.T) {
-		h := newHarness(t, &fakeAgent{})
-		run := h.must(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Ref: "no-such-ref", Prompt: "hello"})
-		failed := h.waitStatus(run.ID, "failed")
-		if !strings.Contains(failed.Error, "no-such-ref") {
-			t.Errorf("error = %q, want git's message about the ref", failed.Error)
-		}
-	})
 }
 
 func TestRecoverFailsRunsThatWereActive(t *testing.T) {
