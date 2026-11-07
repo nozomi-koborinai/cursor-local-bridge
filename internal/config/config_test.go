@@ -18,11 +18,12 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{
-		Home:        home,
-		AgentPath:   "agent",
-		Backend:     backend.ACP,
-		SocketPath:  filepath.Join(home, "clb.sock"),
-		WorktreeDir: filepath.Join(home, "worktrees"),
+		Home:           home,
+		AgentPath:      "agent",
+		Backend:        backend.ACP,
+		SocketPath:     filepath.Join(home, "clb.sock"),
+		WorktreeDir:    filepath.Join(home, "worktrees"),
+		StoreAllEvents: false,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -52,20 +53,22 @@ func TestLoadFullFile(t *testing.T) {
 		"model": "composer",
 		"socketPath": "/tmp/clb.sock",
 		"worktreeDir": "/tmp/worktrees",
-		"webhook": {"url": "https://example.com/hook", "secret": "s3cret"}
+		"webhook": {"url": "https://example.com/hook", "secret": "s3cret"},
+		"storeAllEvents": true
 	}`)
 	got, err := Load(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Config{
-		Home:        home,
-		AgentPath:   "/opt/agent",
-		Backend:     backend.Print,
-		Model:       "composer",
-		SocketPath:  "/tmp/clb.sock",
-		WorktreeDir: "/tmp/worktrees",
-		Webhook:     Webhook{URL: "https://example.com/hook", Secret: "s3cret"},
+		Home:           home,
+		AgentPath:      "/opt/agent",
+		Backend:        backend.Print,
+		Model:          "composer",
+		SocketPath:     "/tmp/clb.sock",
+		WorktreeDir:    "/tmp/worktrees",
+		Webhook:        Webhook{URL: "https://example.com/hook", Secret: "s3cret"},
+		StoreAllEvents: true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)

@@ -81,6 +81,9 @@ func TestCLB(t *testing.T) {
 		if counts["agent_message_chunk"] < 3 || counts["tool_call"] < 1 || counts["prompt"] != 1 {
 			t.Errorf("event counts = %v, want at least 3 agent_message_chunk, a tool_call, and a prompt", counts)
 		}
+		if counts["agent_thought_chunk"] != 0 || counts["available_commands_update"] != 0 {
+			t.Errorf("event counts = %v, want no agent_thought_chunk or available_commands_update", counts)
+		}
 		if got := statuses(t, events); !slices.Equal(got, []string{"queued", "running", "finished"}) {
 			t.Errorf("statuses = %v, want [queued running finished]", got)
 		}

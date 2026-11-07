@@ -83,6 +83,52 @@ func TestLaunchRunsToFinishedAndNotifies(t *testing.T) {
 	h.waitNDJSONMatchesLogs(run.ID)
 }
 
+func TestThoughtAndCommandUpdatesAreNotStored(t *testing.T) {
+	const summary = "thinking echo: hello"
+	prompt := func(_ context.Context, s *fakeSession, text string) error {
+		s.sink.Event(backend.Event{
+			Type: "agent_thought_chunk",
+			Data: json.RawMessage(`{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}`),
+			Text: "thinking ",
+		})
+		s.sink.Event(backend.Event{
+			Type: "available_commands_update",
+			Data: json.RawMessage(`{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"create_plan","description":"Create a plan"}]}`),
+		})
+		return echo(context.Background(), s, text)
+	}
+	stored := []string{
+		"status", "status", "prompt", "agent_message_chunk", "tool_call", "agent_message_chunk", "status", "webhook",
+	}
+	for _, tc := range []struct {
+		name     string
+		storeAll bool
+		want     []string
+	}{
+		{name: "default", want: stored},
+		{name: "storeAllEvents", storeAll: true, want: []string{
+			"status", "status", "prompt", "agent_thought_chunk", "available_commands_update",
+			"agent_message_chunk", "tool_call", "agent_message_chunk", "status", "webhook",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, &fakeAgent{onPrompt: prompt}, func(cfg *config.Config) {
+				cfg.StoreAllEvents = tc.storeAll
+			})
+			run := h.launch("hello")
+			done := h.waitStatus(run.ID, "finished")
+			if done.Summary != summary {
+				t.Errorf("summary = %q, want %q", done.Summary, summary)
+			}
+			events := h.waitLog(run.ID, hasType("webhook"))
+			if got := types(events); !slices.Equal(got, tc.want) {
+				t.Errorf("event types = %v, want %v", got, tc.want)
+			}
+			h.waitNDJSONMatchesLogs(run.ID)
+		})
+	}
+}
+
 func TestFollowUpWhileRunningIsSentAfterTheTurn(t *testing.T) {
 	release := make(chan struct{})
 	agent := &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, prompt string) error {
@@ -558,7 +604,7 @@ type harness struct {
 	stop  func()
 }
 
-func newHarness(t *testing.T, agent *fakeAgent) *harness {
+func newHarness(t *testing.T, agent *fakeAgent, edit ...func(*config.Config)) *harness {
 	t.Helper()
 	// macOS limits unix socket paths to 104 bytes and t.TempDir is long there.
 	home, err := os.MkdirTemp("", "clb")
@@ -569,6 +615,9 @@ func newHarness(t *testing.T, agent *fakeAgent) *harness {
 	cfg, err := config.Load(home)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, fn := range edit {
+		fn(&cfg)
 	}
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {

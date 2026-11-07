@@ -155,8 +155,9 @@ func TestPromptStreamsReply(t *testing.T) {
 	for _, e := range events {
 		counts[e.Type]++
 	}
-	if counts["tool_call"] != 1 || counts["agent_message_chunk"] < 3 {
-		t.Errorf("event types = %v, want one tool_call and at least 3 agent_message_chunk", counts)
+	if counts["tool_call"] != 1 || counts["tool_call_update"] != 1 || counts["agent_message_chunk"] < 3 ||
+		counts["agent_thought_chunk"] != 1 || counts["available_commands_update"] != 1 {
+		t.Errorf("event types = %v, want one tool_call, one tool_call_update, one thought chunk, one available-commands update, and at least 3 agent_message_chunk", counts)
 	}
 	last := events[len(events)-1]
 	var end struct{ StopReason string }
@@ -166,6 +167,69 @@ func TestPromptStreamsReply(t *testing.T) {
 	if asked := sink.permissions(); len(asked) != 0 {
 		t.Errorf("asked %d permissions for a plain prompt", len(asked))
 	}
+}
+
+func TestPromptForwardsEmptyRawInput(t *testing.T) {
+	useState(t)
+	sink := &recorder{}
+	s, _ := start(t, sink, backend.StartOptions{})
+
+	if err := s.Prompt(context.Background(), "hello there"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	events := sink.snapshot()
+	var call, update backend.Event
+	found := false
+	for i, e := range events {
+		if e.Type != "tool_call" {
+			continue
+		}
+		call = e
+		if i+1 < len(events) {
+			update = events[i+1]
+		}
+		found = true
+		break
+	}
+	if !found || update.Type != "tool_call_update" {
+		t.Fatalf("events = %v, want a tool_call followed by a tool_call_update", eventTypes(events))
+	}
+	gotCall := toolCallFieldsOf(t, call.Data)
+	gotUpdate := toolCallFieldsOf(t, update.Data)
+	if gotCall.ToolCallID != "read-1" || string(gotCall.RawInput) != "{}" {
+		t.Errorf("tool_call = %s, want toolCallId read-1 and rawInput {}", call.Data)
+	}
+	if gotUpdate.ToolCallID != "read-1" || string(gotUpdate.RawInput) != `{"path":"README.md"}` {
+		t.Errorf("tool_call_update = %s, want toolCallId read-1 and rawInput {\"path\":\"README.md\"}", update.Data)
+	}
+	last := events[len(events)-1]
+	var end struct{ StopReason string }
+	if err := json.Unmarshal(last.Data, &end); last.Type != "turn_ended" || err != nil || end.StopReason != "end_turn" {
+		t.Errorf("last event = %s %s, want turn_ended with stopReason end_turn", last.Type, last.Data)
+	}
+}
+
+type toolCallFields struct {
+	ToolCallID string          `json:"toolCallId"`
+	RawInput   json.RawMessage `json:"rawInput"`
+}
+
+func toolCallFieldsOf(t *testing.T, data json.RawMessage) toolCallFields {
+	t.Helper()
+	var got toolCallFields
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func eventTypes(events []backend.Event) []string {
+	out := make([]string, len(events))
+	for i, e := range events {
+		out[i] = e.Type
+	}
+	return out
 }
 
 func TestPermissionAnswerReachesAgent(t *testing.T) {
