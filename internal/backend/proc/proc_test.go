@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,17 +16,22 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if os.Getenv("PROC_TEST_DETACH") == "1" {
-		detach()
+	if env, ok := os.LookupEnv("PROC_TEST_DETACH"); ok {
+		detach(env)
 	}
 	os.Exit(m.Run())
 }
 
 // detach starts a sleep in a new session, prints its pid, and exits, which
-// leaves the sleep outside the process group that Stop kills.
-func detach() {
+// leaves the sleep outside the process group that Stop kills. With env
+// "empty" the sleep gets an empty environment, the way the Cursor CLI runs
+// terminal commands.
+func detach(env string) {
 	cmd := exec.Command("sleep", "120")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if env == "empty" {
+		cmd.Env = []string{}
+	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -36,8 +42,8 @@ func detach() {
 
 func TestStopEndsDescendantsThatLeftTheGroup(t *testing.T) {
 	dir := t.TempDir()
-	p, grandchild := startDetaching(t, dir)
-	_, otherGrandchild := startDetaching(t, dir)
+	p, grandchild := startDetaching(t, dir, "inherit")
+	_, otherGrandchild := startDetaching(t, dir, "inherit")
 
 	bystander := exec.Command("sleep", "120")
 	bystander.Dir = dir
@@ -56,14 +62,7 @@ func TestStopEndsDescendantsThatLeftTheGroup(t *testing.T) {
 
 	p.Stop()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for !errors.Is(syscall.Kill(grandchild, 0), syscall.ESRCH) {
-		if time.Now().After(deadline) {
-			_ = syscall.Kill(grandchild, syscall.SIGKILL)
-			t.Fatalf("process %d, which the stopped process started in a new session, still runs 5s after Stop", grandchild)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitGone(t, grandchild, "a sleep the stopped process started in a new session")
 	select {
 	case <-ended:
 		t.Error("Stop ended a sleep that the test started itself in the same directory")
@@ -74,9 +73,121 @@ func TestStopEndsDescendantsThatLeftTheGroup(t *testing.T) {
 	}
 }
 
+func TestEndUnderEndsProcessesWorkingInTheDir(t *testing.T) {
+	base := t.TempDir()
+	run := mkdir(t, base, "run-1")
+	_, inRun := startDetaching(t, run, "empty")
+	_, below := startDetaching(t, mkdir(t, run, "src"), "empty")
+	survivors := map[string]<-chan struct{}{
+		"a sibling whose name extends the dir's": sleepIn(t, mkdir(t, base, "run-10")),
+		"the parent":                             sleepIn(t, base),
+	}
+
+	EndUnder(run)
+
+	waitGone(t, inRun, "a sleep working in the dir")
+	waitGone(t, below, "a sleep working below the dir")
+	time.Sleep(200 * time.Millisecond)
+	for where, ended := range survivors {
+		select {
+		case <-ended:
+			t.Errorf("EndUnder ended a sleep working in %s", where)
+		default:
+		}
+	}
+}
+
+func TestEndUnderResolvesSymlinks(t *testing.T) {
+	base := t.TempDir()
+	run := mkdir(t, base, "run-1")
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(run, link); err != nil {
+		t.Fatal(err)
+	}
+	_, pid := startDetaching(t, run, "empty")
+
+	EndUnder(link)
+
+	waitGone(t, pid, "a sleep working in the dir the symlink names")
+}
+
+func TestEndUnderNeedsAnAbsoluteDirOtherThanTheRoot(t *testing.T) {
+	base := t.TempDir()
+	run := mkdir(t, base, "run-1")
+	for name, target := range map[string]string{"link": run, "root": "/"} {
+		if err := os.Symlink(target, filepath.Join(base, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inRun, inRoot := sleepIn(t, run), sleepIn(t, "/")
+	t.Chdir(base)
+
+	for _, dir := range []string{"run-1", "link", "/", filepath.Join(base, "root")} {
+		EndUnder(dir)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-inRun:
+		t.Error("EndUnder with a relative path ended a sleep working in the dir it names")
+	default:
+	}
+	select {
+	case <-inRoot:
+		t.Error("EndUnder with the root ended a sleep working in /")
+	default:
+	}
+}
+
+func mkdir(t *testing.T, parent, name string) string {
+	t.Helper()
+	dir := filepath.Join(parent, name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// sleepIn starts a sleep in a new session with an empty environment and dir
+// as its working directory. The channel closes when the sleep exits.
+func sleepIn(t *testing.T, dir string) <-chan struct{} {
+	t.Helper()
+	cmd := exec.Command("sleep", "120")
+	cmd.Dir = dir
+	cmd.Env = []string{}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(ended)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-ended
+	})
+	return ended
+}
+
+// waitGone waits for pid, which this process did not start, to end.
+func waitGone(t *testing.T, pid int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("%s, process %d, still runs 5s later", what, pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // startDetaching returns the Process of an exited detach helper and the pid
-// of the sleep it left running.
-func startDetaching(t *testing.T, dir string) (*Process, int) {
+// of the sleep it left running in dir, with the helper's environment or, when
+// env is "empty", none.
+func startDetaching(t *testing.T, dir, env string) (*Process, int) {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -86,7 +197,7 @@ func startDetaching(t *testing.T, dir string) (*Process, int) {
 	// one, which would start helpers of its own.
 	cmd := exec.Command(self, "-test.run=^$")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH=1")
+	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH="+env)
 	p, err := Start(cmd)
 	if err != nil {
 		t.Fatal(err)
