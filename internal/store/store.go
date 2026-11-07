@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -63,6 +64,13 @@ const runColumns = `id, repo, base_ref, branch, worktree, backend, model, sessio
 
 // Open opens or creates the database at path and applies pending migrations.
 func Open(path string) (*Store, error) {
+	// SQLite gives the -wal and -shm files the mode of the database file, so
+	// creating it owner-only first keeps prompts and summaries private.
+	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	_ = f.Close()
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -253,6 +254,27 @@ func TestGetRunRejectsCorruptRows(t *testing.T) {
 	}
 	if _, err := s.GetRun(ctx, "bad"); err == nil {
 		t.Fatal("bad prompts accepted")
+	}
+}
+
+func TestDatabaseFilesAreOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clb.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.CreateRun(t.Context(), newRun("run-1", time.Now())); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("%s has mode %v, want no group or other access", filepath.Base(p), perm)
+		}
 	}
 }
 
