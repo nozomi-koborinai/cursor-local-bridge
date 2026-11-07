@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd does not expand ~ or $HOME. Replace __CLB__ with the absolute path
+  of the clb binary and __HOME__ with your home directory, then copy this file
+  to ~/Library/LaunchAgents/. See README.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.nozomi-koborinai.clb</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CLB__</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.clb/daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.clb/daemon.log</string>
+</dict>
+</plist>
