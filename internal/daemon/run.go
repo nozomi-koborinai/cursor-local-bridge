@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
@@ -209,6 +210,7 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 			a.closeBackend()
 		case lifecycle.RemoveWorktree:
 			a.awaitClosed()
+			proc.EndUnder(run.Worktree)
 			if err := worktree.Remove(a.d.ctx, run.Repo, run.Worktree); err != nil {
 				errs = append(errs, fmt.Errorf("remove worktree: %w", err))
 			}
@@ -251,6 +253,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
 		}
+		proc.EndUnder(run.Worktree)
 	})
 }
 
@@ -374,13 +377,15 @@ func (a *actor) closeBackend() {
 	}
 }
 
-// closeWait exceeds the longest Close, which proc.Stop bounds by sending
-// SIGKILL after its grace period.
-const closeWait = 10 * time.Second
+// closeWait exceeds the longest Close plus one sweep of the worktree.
+// proc.Stop sends SIGKILL after its grace period, and a sweep gives up after
+// its last round. A resumed session must not start while the sweep could
+// still end it.
+const closeWait = 15 * time.Second
 
-// awaitClosed waits for the last closed session's agent to exit, so that no
-// agent is still running in the worktree when it is removed or when a
-// resumed session starts there.
+// awaitClosed waits for the last closed session's agent to exit and for the
+// sweep of the worktree, so that neither is still running when the worktree
+// is removed or when a resumed session starts there.
 func (a *actor) awaitClosed() {
 	g := a.closing
 	if g == nil {

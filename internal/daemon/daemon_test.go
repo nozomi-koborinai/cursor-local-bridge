@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -504,6 +505,65 @@ func TestStopRemovesTheWorktreeAfterTheAgentExits(t *testing.T) {
 	}
 	if _, err := os.Stat(run.Worktree); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("worktree after stop: %v, want it gone", err)
+	}
+}
+
+func TestAFinishedRunEndsProcessesInItsWorktree(t *testing.T) {
+	release := make(chan struct{})
+	agent := &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, prompt string) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return echo(ctx, s, prompt)
+	}}
+	h := newHarness(t, agent)
+
+	run := h.launch("start a dev server")
+	h.waitStatus(run.ID, "running")
+	inWorktree, inRepo := sleepIn(t, run.Worktree), sleepIn(t, h.repo)
+	close(release)
+	h.waitStatus(run.ID, "finished")
+
+	select {
+	case <-inWorktree:
+	case <-time.After(timeout):
+		t.Fatalf("a sleep working in the worktree still runs %v after the run finished", timeout)
+	}
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-inRepo:
+		t.Error("finishing the run ended a sleep working in the source repository")
+	default:
+	}
+}
+
+func TestStopOfAFinishedRunEndsProcessesInItsWorktree(t *testing.T) {
+	h := newHarness(t, &fakeAgent{})
+	run := h.launch("hello")
+	h.waitStatus(run.ID, "finished")
+	// Serve returns after the closed session's sweep of the worktree, so
+	// only the stop can end the sleeps started after the restart.
+	h.stop()
+	h.serve(h.newDaemon())
+	inWorktree, inRepo := sleepIn(t, run.Worktree), sleepIn(t, h.repo)
+
+	h.must(ipc.Request{Method: ipc.MethodStop, RunID: run.ID})
+
+	select {
+	case <-inWorktree:
+	case <-time.After(timeout):
+		t.Fatalf("a sleep working in the worktree still runs %v after stop", timeout)
+	}
+	if _, err := os.Stat(run.Worktree); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("worktree after stop: %v, want it gone", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case <-inRepo:
+		t.Error("stop ended a sleep working in the source repository")
+	default:
 	}
 }
 
@@ -1111,6 +1171,29 @@ func waitClosed(t *testing.T, s *fakeSession) {
 	case <-time.After(timeout):
 		t.Fatalf("session-%d was never closed", s.n)
 	}
+}
+
+// sleepIn starts a sleep the way the Cursor CLI runs a terminal command: in a
+// new session, with an empty environment. The channel closes when it exits.
+func sleepIn(t *testing.T, dir string) <-chan struct{} {
+	t.Helper()
+	cmd := exec.Command("sleep", "120")
+	cmd.Dir = dir
+	cmd.Env = []string{}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(ended)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-ended
+	})
+	return ended
 }
 
 func echo(_ context.Context, s *fakeSession, prompt string) error {

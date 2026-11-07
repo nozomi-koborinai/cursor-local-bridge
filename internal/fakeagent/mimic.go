@@ -29,9 +29,12 @@ func rejectModel() {
 
 // background leaves a command running after the turn ends, the way the real
 // CLI's backgrounded shell commands do. The command runs in its own session,
-// outside the agent's process group.
-func (a *fakeACP) background(ctx context.Context, sid acp.SessionId) (string, error) {
+// outside the agent's process group, with an empty environment and dir as
+// its working directory.
+func (a *fakeACP) background(ctx context.Context, sid acp.SessionId, dir string) (string, error) {
 	cmd := exec.Command("sleep", "120")
+	cmd.Dir = dir
+	cmd.Env = []string{}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return "", err
