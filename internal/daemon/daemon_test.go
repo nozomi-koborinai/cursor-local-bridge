@@ -83,6 +83,49 @@ func TestLaunchRunsToFinishedAndNotifies(t *testing.T) {
 	h.waitNDJSONMatchesLogs(run.ID)
 }
 
+func TestPrintThinkingIsNotStored(t *testing.T) {
+	prompt := func(_ context.Context, s *fakeSession, text string) error {
+		s.sink.Event(backend.Event{
+			Type: "thinking",
+			Data: json.RawMessage(`{"type":"thinking","subtype":"delta","text":"hmm"}`),
+		})
+		s.sink.Event(backend.Event{
+			Type: "thinking",
+			Data: json.RawMessage(`{"type":"thinking","subtype":"completed"}`),
+		})
+		return echo(context.Background(), s, text)
+	}
+	stored := []string{
+		"status", "status", "prompt", "agent_message_chunk", "tool_call", "agent_message_chunk", "status", "webhook",
+	}
+	withThinking := []string{
+		"status", "status", "prompt", "thinking", "thinking",
+		"agent_message_chunk", "tool_call", "agent_message_chunk", "status", "webhook",
+	}
+	for _, tc := range []struct {
+		name     string
+		storeAll bool
+		want     []string
+	}{
+		{name: "default", want: stored},
+		{name: "storeAllEvents", storeAll: true, want: withThinking},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, &fakeAgent{onPrompt: prompt}, func(cfg *config.Config) {
+				cfg.StoreAllEvents = tc.storeAll
+			})
+			run := h.launch("hello")
+			if done := h.waitStatus(run.ID, "finished"); done.Summary != "echo: \nhello" {
+				t.Errorf("summary = %q, want the reply", done.Summary)
+			}
+			events := h.waitLog(run.ID, hasType("webhook"))
+			if got := types(events); !slices.Equal(got, tc.want) {
+				t.Errorf("event types = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSummaryJoinsMessageBlocks(t *testing.T) {
 	tool := func(typ string) backend.Event {
 		return backend.Event{Type: typ, Data: json.RawMessage(`{"sessionUpdate":"` + typ + `"}`)}

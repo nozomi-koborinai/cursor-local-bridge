@@ -66,6 +66,12 @@ func runPrint(o printOptions, prompt string) error {
 	if err := emit(map[string]any{"type": "system", "subtype": "init", "model": o.model, "cwd": o.workspace}); err != nil {
 		return err
 	}
+	if err := emit(map[string]any{"type": "thinking", "subtype": "delta", "text": "thinking"}); err != nil {
+		return err
+	}
+	if err := emit(map[string]any{"type": "thinking", "subtype": "completed"}); err != nil {
+		return err
+	}
 	var reply string
 	switch scriptFor(prompt) {
 	case scriptCrash:

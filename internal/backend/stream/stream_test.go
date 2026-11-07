@@ -145,7 +145,7 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 
-	if got, want := sink.types(), []string{"system", "assistant", "result"}; !reflect.DeepEqual(got, want) {
+	if got, want := sink.types(), []string{"system", "thinking", "thinking", "assistant", "result"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("event types = %q, want %q", got, want)
 	}
 	if got := sink.text(); got != "echo: hello there" {

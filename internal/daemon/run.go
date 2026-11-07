@@ -23,11 +23,13 @@ const (
 	eventWebhook             = "webhook"
 )
 
-// Thought chunks and available-command updates repeat on every turn and
-// bloat the run log. Backends still forward them.
+// Thought chunks, including print-mode "thinking", and available-command
+// updates repeat on every turn and bloat the run log. Backends still
+// forward them.
 var unstoredEvents = map[string]bool{
 	"agent_thought_chunk":       true,
 	"available_commands_update": true,
+	"thinking":                  true,
 }
 
 type statusData struct {

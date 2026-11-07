@@ -34,6 +34,18 @@ func TestPrintLaunchWithTrust(t *testing.T) {
 	if done.Summary != "echo: hi" {
 		t.Errorf("summary = %q, want %q", done.Summary, "echo: hi")
 	}
+	var assistant, thinking int
+	for _, e := range c.logs(t, launched.ID) {
+		switch e.Type {
+		case "assistant":
+			assistant++
+		case "thinking":
+			thinking++
+		}
+	}
+	if assistant == 0 || thinking != 0 {
+		t.Fatalf("assistant events = %d, thinking events = %d, want the reply stored and thinking omitted", assistant, thinking)
+	}
 }
 
 func startPrintCLB(t *testing.T, trust bool) (*clb, string) {
