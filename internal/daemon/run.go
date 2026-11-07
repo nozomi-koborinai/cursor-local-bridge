@@ -15,7 +15,6 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/worktree"
 )
 
-// Event types the daemon writes next to the agent's own events.
 const (
 	eventStatus              = "status"
 	eventPrompt              = "prompt"
@@ -44,29 +43,20 @@ type webhookData struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// actor owns one run. Its goroutine runs every function sent to inbox, and
-// it is the only writer of the run's row, events, and NDJSON log. The fields
-// after inbox belong to that goroutine.
 type actor struct {
 	d     *Daemon
 	id    store.RunID
 	inbox chan func()
 
-	gen *generation
-	// closing is the last closed generation. Its agent may still be
-	// shutting down.
+	gen     *generation
 	closing *generation
 	perms   int
 }
 
-// generation is one agent session of a run, from StartBackend to
-// CloseBackend. Everything a session reports carries its generation, so
-// reports from a closed session are dropped.
 type generation struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	session Session
-	// closed is closed once the session's Close has returned.
 	closed  chan struct{}
 	turn    strings.Builder
 	answers map[string]chan<- bool
@@ -86,8 +76,6 @@ func (a *actor) loop() {
 	}
 }
 
-// post queues f for the run's goroutine. It reports false once the daemon
-// is stopping.
 func (a *actor) post(f func()) bool {
 	select {
 	case a.inbox <- f:
@@ -99,7 +87,6 @@ func (a *actor) post(f func()) bool {
 
 var errStopping = errors.New("the daemon is shutting down")
 
-// call runs f on the run's goroutine and returns the run as stored after f.
 func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
 	type result struct {
 		run store.Run
@@ -140,8 +127,6 @@ func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
 	return a.perform(run, effects)
 }
 
-// apply moves the run through e, stores the result with edit applied, and
-// performs the transition's effects.
 func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
 	run, err := a.d.store.GetRun(a.d.writes, a.id)
 	if err != nil {
@@ -167,8 +152,6 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	return run, a.perform(run, effects)
 }
 
-// record applies a transition reported by an agent session or a goroutine
-// the actor started. Nobody waits for the result, so errors are logged.
 func (a *actor) record(e lifecycle.Event, edit func(*store.Run)) {
 	if _, err := a.apply(e, edit); err != nil {
 		a.d.log.Error("apply run event", "run", a.id, "event", fmt.Sprintf("%T", e), "err", err)
@@ -205,9 +188,6 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 	return errors.Join(errs...)
 }
 
-// startBackend creates the worktree on the run's goroutine, so a stop can
-// never interleave with it, then starts the session in the background. The
-// goroutine that starts the session also closes it when its generation ends.
 func (a *actor) startBackend(run store.Run, resume bool) {
 	a.awaitClosed()
 	if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
@@ -294,8 +274,6 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, an
 	a.appendEvent(eventPermissionRequested, p)
 }
 
-// nextPermissionID numbers permissions per run. The count starts from the
-// stored events, so IDs stay unique across daemon restarts.
 func (a *actor) nextPermissionID() string {
 	if a.perms == 0 {
 		events, err := a.d.store.Events(a.d.writes, a.id, 0)
@@ -330,13 +308,8 @@ func (a *actor) closeBackend() {
 	}
 }
 
-// closeWait bounds the wait for a closed session's agent to exit. Closing an
-// agent takes at most a few seconds unless its backend ignores cancellation.
 const closeWait = 10 * time.Second
 
-// awaitClosed waits until the agent of the last closed session has exited,
-// so that no agent is still running in the worktree when it is removed or
-// when a resumed session starts there.
 func (a *actor) awaitClosed() {
 	g := a.closing
 	if g == nil {
@@ -382,8 +355,6 @@ func (a *actor) delivered(status string, err error) {
 	a.appendEvent(eventWebhook, data)
 }
 
-// appendEvent appends an event to the run's log in the store and then to its
-// NDJSON file. A failure is logged and does not stop the run.
 func (a *actor) appendEvent(typ string, data any) {
 	raw, err := json.Marshal(data)
 	if err != nil {
@@ -400,7 +371,6 @@ func (a *actor) appendEvent(typ string, data any) {
 	}
 }
 
-// sink hands one generation's session output to the run's goroutine.
 type sink struct {
 	a *actor
 	g *generation

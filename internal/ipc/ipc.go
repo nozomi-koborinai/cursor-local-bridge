@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-// Method names a daemon operation.
 type Method string
 
 const (
@@ -46,7 +45,6 @@ type Response struct {
 	Error *Error `json:"error,omitempty"`
 }
 
-// Error codes.
 const (
 	CodeInvalid  = "invalid"
 	CodeNotFound = "not_found"
@@ -54,7 +52,6 @@ const (
 	CodeInternal = "internal"
 )
 
-// Error is a failed call.
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -62,7 +59,6 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
-// Run is the public view of a run.
 type Run struct {
 	ID                string      `json:"id"`
 	Status            string      `json:"status"`

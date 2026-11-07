@@ -24,11 +24,8 @@ import (
 const (
 	cursorLogin      = "cursor_login"
 	authRequiredCode = -32000
-	// cancelWait bounds how long to wait on the agent after session/cancel.
-	cancelWait = time.Second
-	// exitGrace bounds the wait for the exit status after the connection
-	// drops. proc waits up to a second for stderr after the process exits.
-	exitGrace = 2 * time.Second
+	cancelWait       = time.Second
+	exitGrace        = 2 * time.Second
 )
 
 // authTimeout bounds authenticate, which the CLI never answers when it has no
@@ -40,8 +37,6 @@ var (
 	errAuthTimeout = errors.New("authenticate timed out")
 )
 
-// permissionKinds lists, for each answer, the option kinds to select in order
-// of preference. A denial only ever selects a reject option.
 var permissionKinds = map[bool][]acpsdk.PermissionOptionKind{
 	true:  {acpsdk.PermissionOptionKindAllowOnce, acpsdk.PermissionOptionKindAllowAlways},
 	false: {acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways},
@@ -52,8 +47,6 @@ type Session struct {
 	agentPath string
 	sink      backend.Sink
 
-	// life ends when Close is called or the agent process exits, and its
-	// cause says which. Every request to the agent is bound to it.
 	life      context.Context
 	end       context.CancelCauseFunc
 	closeOnce sync.Once
@@ -67,7 +60,6 @@ type Session struct {
 	id    acpsdk.SessionId
 }
 
-// New returns a session that runs agentPath and reports to sink.
 func New(agentPath string, sink backend.Sink) *Session {
 	life, end := context.WithCancelCause(context.Background())
 	return &Session{agentPath: agentPath, sink: sink, life: life, end: end}
@@ -254,8 +246,6 @@ func (s *Session) Close() error {
 	return nil
 }
 
-// bind returns a context that also ends, with the same cause, when the
-// session ends.
 func (s *Session) bind(ctx context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	stop := context.AfterFunc(s.life, func() { cancel(context.Cause(s.life)) })
@@ -302,7 +292,6 @@ func clientVersion() string {
 	return ""
 }
 
-// client answers the agent's requests to clb.
 type client struct{ s *Session }
 
 var _ acpsdk.Client = client{}

@@ -19,7 +19,6 @@ const (
 	Print Kind = "print"
 )
 
-// ParseKind converts config or wire text into a Kind.
 func ParseKind(s string) (Kind, error) {
 	switch k := Kind(s); k {
 	case ACP, Print:
@@ -28,13 +27,11 @@ func ParseKind(s string) (Kind, error) {
 	return "", fmt.Errorf("unknown backend %q (want %q or %q)", s, ACP, Print)
 }
 
-// StartOptions says where and how to start an agent.
 type StartOptions struct {
 	// Dir is the working directory of the agent, the run's worktree.
 	Dir string
 	// Model is passed to the CLI as --model when not empty.
-	Model string
-	// ResumeSessionID continues an earlier session when not empty.
+	Model           string
 	ResumeSessionID string
 }
 
@@ -43,7 +40,6 @@ type Event struct {
 	// Type is the protocol's own discriminator, such as the ACP
 	// "sessionUpdate" value or the stream-json "type" value.
 	Type string
-	// Data is the protocol message, unchanged.
 	Data json.RawMessage
 	// Text is the agent's reply text carried by this event, if any. The
 	// daemon joins it into the run summary.

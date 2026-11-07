@@ -234,7 +234,6 @@ func TestStopWhileStartingClosesTheLateSession(t *testing.T) {
 	entered := make(chan struct{})
 	agent := &fakeAgent{onStart: func(ctx context.Context, _ *fakeSession) {
 		close(entered)
-		// The start succeeds anyway, as if it finished just as stop came in.
 		<-ctx.Done()
 	}}
 	h := newHarness(t, agent)
@@ -527,8 +526,6 @@ func TestListShowsEveryRunNewestFirst(t *testing.T) {
 	}
 }
 
-// harness runs a daemon with a fake agent, the real store, a real git
-// repository, and a webhook receiver that checks signatures.
 type harness struct {
 	t     *testing.T
 	cfg   config.Config
@@ -677,8 +674,6 @@ func (h *harness) ndjsonPath(id string) string {
 	return filepath.Join(h.cfg.LogDir(), id+".ndjson")
 }
 
-// waitNDJSONMatchesLogs waits because the NDJSON append follows the store
-// insert that the logs call can already see.
 func (h *harness) waitNDJSONMatchesLogs(id string) {
 	h.t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -706,8 +701,6 @@ func (h *harness) waitNDJSONMatchesLogs(id string) {
 	}
 }
 
-// fakeAgent is an in-memory backend. Each Start returns session-<n>, or the
-// resumed ID. Prompts reply "echo: <prompt>" unless onPrompt is set.
 type fakeAgent struct {
 	startErr error
 	onStart  func(ctx context.Context, s *fakeSession)
@@ -776,7 +769,6 @@ func (s *fakeSession) Prompt(ctx context.Context, text string) error {
 	return echo(ctx, s, text)
 }
 
-// Close closes s.closed when it returns.
 func (s *fakeSession) Close() error {
 	if s.agent.onClose != nil {
 		s.agent.onClose(s)

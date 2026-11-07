@@ -11,10 +11,6 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 )
 
-// The NDJSON log of a run is derived from its events in the store. The run's
-// goroutine appends each event after storing it, and Recover rewrites the
-// file from the store, so a crash between the two writes heals at restart.
-
 func (d *Daemon) logPath(id store.RunID) string {
 	return filepath.Join(d.cfg.LogDir(), string(id)+".ndjson")
 }
@@ -40,7 +36,6 @@ func (d *Daemon) appendLog(e store.Event) error {
 	return errors.Join(err, f.Close())
 }
 
-// writeLog replaces the run's NDJSON log with the events in the store.
 func (d *Daemon) writeLog(ctx context.Context, id store.RunID) error {
 	events, err := d.store.Events(ctx, id, 0)
 	if err != nil {
