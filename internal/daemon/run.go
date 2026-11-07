@@ -72,7 +72,7 @@ type generation struct {
 	cancel  context.CancelFunc
 	session Session
 	closed  chan struct{}
-	turn    strings.Builder
+	turn    turnSummary
 	answers map[string]chan<- bool
 }
 
@@ -283,7 +283,46 @@ func (a *actor) agentEvent(g *generation, e backend.Event) {
 	if a.d.cfg.StoreAllEvents || !unstoredEvents[e.Type] {
 		a.appendEvent(e.Type, e.Data)
 	}
-	g.turn.WriteString(e.Text)
+	g.turn.add(e)
+}
+
+// turnSummary is the turn's message text. A tool call ends the block in
+// progress, so the text before it and the text after it stay separate. Other
+// events, including thought chunks, stay in the current block.
+type turnSummary struct {
+	blocks []string
+	cur    strings.Builder
+}
+
+func (s *turnSummary) add(e backend.Event) {
+	if e.Type == "tool_call" || e.Type == "tool_call_update" {
+		s.endBlock()
+		return
+	}
+	s.cur.WriteString(e.Text)
+}
+
+func (s *turnSummary) endBlock() {
+	if s.cur.Len() == 0 {
+		return
+	}
+	s.blocks = append(s.blocks, s.cur.String())
+	s.cur.Reset()
+}
+
+func (s *turnSummary) String() string {
+	if s.cur.Len() == 0 {
+		return strings.Join(s.blocks, "\n")
+	}
+	blocks := make([]string, len(s.blocks)+1)
+	copy(blocks, s.blocks)
+	blocks[len(s.blocks)] = s.cur.String()
+	return strings.Join(blocks, "\n")
+}
+
+func (s *turnSummary) Reset() {
+	s.blocks = nil
+	s.cur.Reset()
 }
 
 func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
