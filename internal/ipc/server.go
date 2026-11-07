@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -117,9 +118,9 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 		return
 	}
 	go func() {
-		// Clients send nothing after the request, so a read that returns
-		// means the client hung up.
-		_, _ = conn.Read(make([]byte, 1))
+		// The decoder can leave the request's trailing newline unread, so
+		// only EOF or a read error means the client hung up.
+		_, _ = io.Copy(io.Discard, conn)
 		cancel()
 	}()
 

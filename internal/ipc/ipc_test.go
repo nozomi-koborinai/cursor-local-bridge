@@ -2,7 +2,9 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,6 +164,36 @@ func TestClientHangupCancelsTheCall(t *testing.T) {
 	case <-ended:
 	case <-time.After(10 * time.Second):
 		t.Fatal("handler still running after the client hung up")
+	}
+}
+
+func TestBytesAfterTheRequestDoNotCancelTheCall(t *testing.T) {
+	started := make(chan struct{})
+	path := serve(t, listen(t), func(ctx context.Context, _ Request, send func(Response) error) error {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return errors.New("the call was canceled")
+		case <-time.After(100 * time.Millisecond):
+			return send(Response{Runs: []Run{}})
+		}
+	})
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, `{"method":"list"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if _, err := io.WriteString(conn, "\n"); err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
+		t.Fatalf("reply = %+v, %v; want the list reply", resp, err)
 	}
 }
 
