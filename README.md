@@ -228,6 +228,7 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 - `turn_ended` marks the end of a turn that the agent finished. A run that you stop during a turn has no `turn_ended` event for that turn.
 - By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events, or the `thinking` events of the `print` backend. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
 - The Cursor CLI sends the first `tool_call` event for a shell command with `rawInput` set to `{}` and puts the command in a later `tool_call_update` event with the same `toolCallId`. A `tool_call_update` carries only the fields that changed. To get a tool's input, read the latest `rawInput` among the events for its `toolCallId`.
+- After you deny a permission request, the Cursor CLI does not run the command, but a later `tool_call_update` for that `toolCallId` still reports `status` as `completed`. To tell whether a command ran, find the `permission_requested` event whose `toolCall.toolCallId` matches, then read `approved` in the `permission_answered` event with the same `id`.
 
 The same lines are in `~/.clb/logs/<run id>.ndjson`. SQLite is the source of truth. The daemon rewrites the NDJSON files from SQLite when it starts.
 
@@ -307,7 +308,7 @@ Relative paths resolve against the home directory. Unknown fields are an error. 
 ## Backends
 
 - `acp`, the default, runs `agent acp` and talks to it over the Agent Client Protocol on stdio. One agent process serves a run until the run finishes. The permission requests the CLI sends reach you through `awaiting_permission`.
-- `print` runs `agent -p --trust --output-format stream-json --resume <chat id>` once per prompt. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
+- `print` runs `agent -p [--trust] --output-format stream-json --resume <chat id>` once per prompt, with `--trust` only when `trustWorktree` is `true`. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
 
 `agent -p` refuses to run in a workspace that you have not trusted, and every run gets a new worktree. To use the `print` backend, set `trustWorktree` to `true` in the config file, and `clb` passes `--trust`. `--trust` trusts the workspace without a prompt. Unlike `--force`, it does not allow commands. Without `trustWorktree`, `clb launch --backend print` and `clb followup` on a print run fail with an `invalid` error that says how to turn it on.
 
