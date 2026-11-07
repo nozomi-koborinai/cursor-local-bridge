@@ -147,7 +147,12 @@ The commands change the state as follows.
 
 A command in a state that does not allow it fails with a `conflict` error and changes nothing. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
 
-When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. With the `print` backend, this happens after each prompt. `clb` finds these processes by the `CLB_PROC_TOKEN` variable that it adds to the agent's environment, so a process that starts with a cleared environment keeps running.
+When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. It finds them in two ways:
+
+- It adds a `CLB_PROC_TOKEN` variable to the agent's environment and ends the processes that inherited it. With the `print` backend, this happens after each prompt.
+- It ends your processes whose working directory is inside the run's worktree. The Cursor CLI starts terminal commands with an empty environment, so the token does not reach them. This happens after the agent process closes, when the run finishes, fails, or stops, or when the daemon shuts down. It happens again just before `clb stop` removes the worktree.
+
+The second way also ends a process of yours that is not the agent's, such as a shell that you opened in the worktree. `clb` sends SIGTERM, then SIGKILL to any that still run 1 second later. It never matches a working directory outside the run's worktree.
 
 If the daemon stops while runs are active, it marks those runs `failed` when it starts again.
 
@@ -345,16 +350,17 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 - Whether the CLI sends a request before it uses a tool depends on the CLI's own settings, not on `clb`. In testing with a logged-in CLI, the agent applied a file edit without sending a request. To block a tool or a path outright, add it to `permissions.deny` in `~/.cursor/cli-config.json` or the project's `.cursor/cli.json`. See [Permissions](https://cursor.com/docs/cli/reference/permissions) in the Cursor CLI docs.
 - `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
 - An agent runs with your user's rights in its worktree. Review the run's branch before you merge it.
+- When a run's agent closes, `clb` ends every process of yours whose working directory is inside that run's worktree, including a shell that you opened there. See [Run lifecycle](#run-lifecycle).
 
 ## Known gaps
 
-Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered these parts of the `acp` backend: streamed events, a file edit, an approved permission request, a follow-up that resumes the session with `session/load`, `--model`, and a stop during a turn. A manual run of `agent -p --trust --output-format stream-json --resume <chat id>` printed the lines that the `print` backend parses. These parts are tested against the fake agent only:
+Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered these parts of the `acp` backend: streamed events, a file edit, an approved and a denied permission request, a follow-up that resumes the session with `session/load`, `--model`, the error for an unknown model, the newlines in `summary`, and a stop during a turn. They also covered the `print` backend with `trustWorktree`, for a launch and a follow-up. These parts are tested against the fake agent only:
 
-- Denying a permission request from the real CLI.
-- The `print` backend run through `clb` with `trustWorktree`.
-- Ending the commands that the agent ran in the background. If the Cursor CLI starts commands with a cleared environment, they keep running after the agent process ends.
+- Ending the background commands of the real Cursor CLI by their working directory. The fake agent starts its background command the way the real CLI does, with an empty environment, in its own session, and in the worktree. The macOS code that reads another process's working directory runs in the macOS CI job.
 
 Other gaps:
+
+- A command that the agent starts outside the worktree with an empty environment keeps running after the run ends.
 
 - The Cursor CLI creates a folder in `~/.cursor/projects` for each run's worktree, named after the worktree path, such as `~/.cursor/projects/<path>-worktrees-run-3f9a2c7d1e0b`. `clb` does not remove these folders.
 - When `agent -p --resume` gets a chat ID that the CLI does not know, it starts a new chat and reports no error. A follow-up on a `print` run then reaches an agent without the earlier conversation, and `clb` cannot tell.
