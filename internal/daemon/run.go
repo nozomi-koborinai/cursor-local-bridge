@@ -92,12 +92,17 @@ func (a *actor) post(f func()) bool {
 	}
 }
 
-// postFrom queues a report from g and gives up once g is closed. The run's
-// goroutine would drop the report, and while it waits for g's agent to exit
-// it is not reading inbox.
+// postFrom queues a report from g, which runs only while g is still the
+// run's generation. Posting gives up once g is closed, because the run's
+// goroutine is not reading inbox while it waits for g's agent to exit.
 func (a *actor) postFrom(g *generation, f func()) bool {
+	report := func() {
+		if g == a.gen {
+			f()
+		}
+	}
 	select {
-	case a.inbox <- f:
+	case a.inbox <- report:
 		return true
 	case <-g.ctx.Done():
 		return false
@@ -232,7 +237,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.d.wg.Go(func() {
 		defer close(g.closed)
 		sessionID, err := g.session.Start(ctx, opts)
-		a.postFrom(g, func() { a.started(g, sessionID, err) })
+		a.postFrom(g, func() { a.started(sessionID, err) })
 		<-ctx.Done()
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
@@ -240,10 +245,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	})
 }
 
-func (a *actor) started(g *generation, sessionID string, err error) {
-	if g != a.gen {
-		return
-	}
+func (a *actor) started(sessionID string, err error) {
 	if err != nil {
 		a.fail(fmt.Errorf("start agent: %w", err))
 		return
@@ -262,9 +264,6 @@ func (a *actor) sendPrompt(prompt string) {
 }
 
 func (a *actor) promptDone(g *generation, err error) {
-	if g != a.gen {
-		return
-	}
 	if err != nil {
 		a.fail(fmt.Errorf("prompt agent: %w", err))
 		return
@@ -274,17 +273,11 @@ func (a *actor) promptDone(g *generation, err error) {
 }
 
 func (a *actor) agentEvent(g *generation, e backend.Event) {
-	if g != a.gen {
-		return
-	}
 	a.appendEvent(e.Type, e.Data)
 	g.turn.WriteString(e.Text)
 }
 
 func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
-	if g != a.gen {
-		return
-	}
 	p := lifecycle.Permission{ID: a.nextPermissionID(), Title: req.Title, ToolCall: req.ToolCall}
 	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
 	if err != nil || run.Lifecycle.State != lifecycle.AwaitingPermission {
