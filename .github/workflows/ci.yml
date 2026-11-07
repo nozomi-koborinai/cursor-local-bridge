@@ -46,7 +46,11 @@ jobs:
           go-version-file: go.mod
       - run: go test -race -count=1 -tags e2e -v ./e2e/...
       - if: runner.os == 'macOS'
-        run: plutil -lint packaging/launchd/*.plist
+        run: |
+          plist="$RUNNER_TEMP/io.github.nozomi-koborinai.clb.plist"
+          sed -e "s|__CLB__|/usr/local/bin/clb|" -e "s|__HOME__|$HOME|g" packaging/launchd/io.github.nozomi-koborinai.clb.plist > "$plist"
+          if grep -n '__[A-Z]*__' "$plist"; then exit 1; fi
+          plutil -lint "$plist"
 
   govulncheck:
     runs-on: ubuntu-latest

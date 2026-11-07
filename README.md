@@ -10,7 +10,7 @@ Use it where Cursor cloud agents are not available.
 
 - `clb daemon` runs in the background and listens on a unix socket that only your user can open.
 - `clb launch` creates a run. The daemon adds a git worktree for the run on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com).
-- The daemon stores every run and every agent event in SQLite. It also writes each run's events to an NDJSON file that you can `tail -f`.
+- The daemon stores every run and every event the agent streams in SQLite. When a follow-up resumes a session, the history the agent replays is not stored again. It also writes each run's events to an NDJSON file that you can `tail -f`.
 - When the agent asks for permission to run a tool, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`. Nothing is approved by default.
 - When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if you configured one.
 
@@ -86,7 +86,7 @@ A run is in exactly one of these states.
 | `queued` | The daemon is creating the worktree and starting the agent. |
 | `running` | The agent is working on a prompt. |
 | `awaiting_permission` | The agent is blocked until you approve or deny a tool call. |
-| `finished` | The agent ended its turn and no prompts are queued. The agent process has exited. |
+| `finished` | The agent ended its turn and no prompts are queued. The daemon closes the agent process, and a follow-up starts a new one. |
 | `failed` | The agent process failed. `error` says why. |
 | `stopped` | You stopped the run. Its worktree is removed. |
 
@@ -273,7 +273,7 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 
 ## Security
 
-- The socket directory is mode 0700 and the socket is mode 0600. The daemon also checks that each connecting process runs as the same user.
+- The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists.
 - `clb` never approves a permission request on its own and never passes `--force` or `--yolo` to the CLI.
 - An agent runs with your user's rights in its worktree. Review what you approve.
 
