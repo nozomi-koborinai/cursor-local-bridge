@@ -6,7 +6,7 @@ Cursor Local Bridge launches, watches, follows up on, and stops Cursor CLI agent
 
 Use it in environments where cloud agents are not available.
 
-> Status: MVP phase 1. The end-to-end tests run against a fake agent that speaks the same protocol as the Cursor CLI. Some behavior of the real CLI with a logged-in account is not verified yet. See [Known gaps](#known-gaps).
+> Status: MVP phase 1. The end-to-end tests run against a fake agent that speaks the same protocol as the Cursor CLI. Manual tests against the real CLI with a logged-in account covered the main `acp` flows. See [Known gaps](#known-gaps).
 
 ## How it works
 
@@ -132,7 +132,7 @@ A run is in exactly one of these states.
 | `running` | The agent is working on a prompt. |
 | `awaiting_permission` | The agent sent a permission request for a tool call and waits until you approve or deny it. |
 | `finished` | The agent ended its turn and no prompts are queued. The daemon closes the agent process, and a follow-up starts a new one. |
-| `failed` | The agent process failed. `error` says why. |
+| `failed` | The agent process failed. `error` says why. The worktree stays until you run `clb stop`. |
 | `stopped` | You stopped the run. Its worktree is removed. |
 
 The commands change the state as follows.
@@ -222,6 +222,7 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 
 - `status`, `prompt`, `permission_requested`, `permission_answered`, and `webhook` events come from the daemon.
 - Other types come from the agent unchanged. With the `acp` backend they are ACP `sessionUpdate` values such as `agent_message_chunk`, `tool_call`, and `plan`, plus `turn_ended`. With the `print` backend they are stream-json `type` values.
+- `turn_ended` marks the end of a turn that the agent finished. A run that you stop during a turn has no `turn_ended` event for that turn.
 - By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events, or the `thinking` events of the `print` backend. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
 - The Cursor CLI sends the first `tool_call` event for a shell command with `rawInput` set to `{}` and puts the command in a later `tool_call_update` event with the same `toolCallId`. A `tool_call_update` carries only the fields that changed. To get a tool's input, read the latest `rawInput` among the events for its `toolCallId`.
 
@@ -343,14 +344,16 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 
 ## Known gaps
 
-A run against a logged-in Cursor CLI streamed events and applied a file edit. These parts are tested against the fake agent only:
+Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered these parts of the `acp` backend: streamed events, a file edit, an approved permission request, a follow-up that resumes the session with `session/load`, `--model`, and a stop during a turn. A manual run of `agent -p --trust --output-format stream-json --resume <chat id>` printed the lines that the `print` backend parses. These parts are tested against the fake agent only:
 
-- Permission requests from the real CLI, and the options they offer.
-- Resuming a session with `session/load` after a run finishes.
-- Whether `--model` changes the model in `agent acp`.
-- The exact stream-json output of `agent -p`.
+- Denying a permission request from the real CLI.
+- The `print` backend run through `clb` with `trustWorktree`.
 
-A webhook that is still being delivered when the daemon stops is not retried after a restart.
+Other gaps:
+
+- The Cursor CLI creates a folder in `~/.cursor/projects` for each run's worktree, named after the worktree path, such as `~/.cursor/projects/<path>-worktrees-run-3f9a2c7d1e0b`. `clb` does not remove these folders.
+- When `agent -p --resume` gets a chat ID that the CLI does not know, it starts a new chat and reports no error. A follow-up on a `print` run then reaches an agent without the earlier conversation, and `clb` cannot tell.
+- A webhook that is still being delivered when the daemon stops is not retried after a restart.
 
 ## Contributing
 
