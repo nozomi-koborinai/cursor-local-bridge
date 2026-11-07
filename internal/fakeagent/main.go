@@ -29,6 +29,7 @@ func run(argv []string) error {
 	fs := flag.NewFlagSet("fakeagent", flag.ContinueOnError)
 	var o printOptions
 	printMode := fs.Bool("p", false, "print mode")
+	fs.BoolVar(&o.trust, "trust", false, "trust the workspace")
 	fs.StringVar(&o.model, "model", "", "model")
 	fs.StringVar(&o.format, "output-format", "", "print output format")
 	fs.StringVar(&o.resume, "resume", "", "chat to continue")
@@ -45,7 +46,7 @@ func run(argv []string) error {
 	case len(args) == 1 && args[0] == "create-chat":
 		return createChat()
 	}
-	return errors.New("usage: fakeagent [--model M] acp | create-chat | -p --output-format stream-json [--model M] [--resume ID] [--workspace DIR] [--] PROMPT")
+	return errors.New("usage: fakeagent [--model M] acp | create-chat | -p --output-format stream-json [--trust] [--model M] [--resume ID] [--workspace DIR] [--] PROMPT")
 }
 
 func loggedOut() bool { return os.Getenv("FAKEAGENT_LOGGED_OUT") == "1" }

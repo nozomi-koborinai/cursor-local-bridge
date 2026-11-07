@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -107,9 +108,9 @@ func invocations(t *testing.T, state string) []fakeagenttest.Invocation {
 	return invs
 }
 
-func start(t *testing.T, agentPath string, sink backend.Sink, opts backend.StartOptions) (*Session, string) {
+func start(t *testing.T, agentPath string, sink backend.Sink, opts backend.StartOptions, trust bool) (*Session, string) {
 	t.Helper()
-	s := New(agentPath, sink)
+	s := New(agentPath, sink, trust)
 	t.Cleanup(func() { _ = s.Close() })
 	id, err := s.Start(context.Background(), opts)
 	if err != nil {
@@ -130,7 +131,7 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 	dir := t.TempDir()
 	sink := &recorder{t: t}
 	began := time.Now()
-	s, id := start(t, fakeAgent, sink, backend.StartOptions{Dir: dir, Model: "gpt-5"})
+	s, id := start(t, fakeAgent, sink, backend.StartOptions{Dir: dir, Model: "gpt-5"}, true)
 	if took := time.Since(began); took > 5*time.Second {
 		t.Errorf("Start took %s; it must not wait for create-chat to exit", took)
 	}
@@ -157,7 +158,7 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 		t.Errorf("init event = %s, want session_id %q", sink.snapshot()[0].Data, id)
 	}
 	invs = invocations(t, state)
-	want := []string{"-p", "--output-format", "stream-json", "--model", "gpt-5", "--resume", id, "--workspace", dir, "--", "hello there"}
+	want := []string{"-p", "--trust", "--output-format", "stream-json", "--model", "gpt-5", "--resume", id, "--workspace", dir, "--", "hello there"}
 	if len(invs) != 2 || !reflect.DeepEqual(invs[1].Args, want) {
 		t.Errorf("invocations = %+v, want a second one with args %q", invs, want)
 	}
@@ -166,10 +167,10 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 func TestStartAdoptsResumeSessionID(t *testing.T) {
 	state := useState(t)
 	dir := t.TempDir()
-	_, id := start(t, fakeAgent, &recorder{t: t}, backend.StartOptions{Dir: dir})
+	_, id := start(t, fakeAgent, &recorder{t: t}, backend.StartOptions{Dir: dir}, false)
 
 	sink := &recorder{t: t}
-	s, resumed := start(t, fakeAgent, sink, backend.StartOptions{Dir: dir, ResumeSessionID: id})
+	s, resumed := start(t, fakeAgent, sink, backend.StartOptions{Dir: dir, ResumeSessionID: id}, true)
 	if resumed != id {
 		t.Fatalf("Start = %q, want %q", resumed, id)
 	}
@@ -183,7 +184,7 @@ func TestStartAdoptsResumeSessionID(t *testing.T) {
 		t.Errorf("text = %q, want %q", got, "echo: again")
 	}
 	invs := invocations(t, state)
-	want := []string{"-p", "--output-format", "stream-json", "--resume", id, "--workspace", dir, "--", "again"}
+	want := []string{"-p", "--trust", "--output-format", "stream-json", "--resume", id, "--workspace", dir, "--", "again"}
 	if !reflect.DeepEqual(invs[len(invs)-1].Args, want) {
 		t.Errorf("args = %q, want %q", invs[len(invs)-1].Args, want)
 	}
@@ -192,7 +193,7 @@ func TestStartAdoptsResumeSessionID(t *testing.T) {
 func TestCloseStopsPromptInFlight(t *testing.T) {
 	state := useState(t)
 	sink := &recorder{t: t}
-	s, _ := start(t, fakeAgent, sink, backend.StartOptions{Dir: t.TempDir()})
+	s, _ := start(t, fakeAgent, sink, backend.StartOptions{Dir: t.TempDir()}, true)
 
 	prompted := make(chan error, 1)
 	go func() { prompted <- s.Prompt(context.Background(), "[slow]") }()
@@ -225,7 +226,7 @@ func TestCloseStopsPromptInFlight(t *testing.T) {
 func TestPromptHonorsContext(t *testing.T) {
 	useState(t)
 	sink := &recorder{t: t}
-	s, _ := start(t, fakeAgent, sink, backend.StartOptions{Dir: t.TempDir()})
+	s, _ := start(t, fakeAgent, sink, backend.StartOptions{Dir: t.TempDir()}, true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	prompted := make(chan error, 1)
@@ -255,7 +256,7 @@ func TestPromptFailures(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			useState(t)
-			s, _ := start(t, fakeAgent, &recorder{t: t}, backend.StartOptions{Dir: t.TempDir()})
+			s, _ := start(t, fakeAgent, &recorder{t: t}, backend.StartOptions{Dir: t.TempDir()}, true)
 			if tt.loggedOut {
 				t.Setenv("FAKEAGENT_LOGGED_OUT", "1")
 			}
@@ -279,7 +280,7 @@ func TestPromptForwardsNonJSONAndReportsErrorResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := &recorder{t: t}
-	s, _ := start(t, script, sink, backend.StartOptions{Dir: t.TempDir(), ResumeSessionID: "chat-1"})
+	s, _ := start(t, script, sink, backend.StartOptions{Dir: t.TempDir(), ResumeSessionID: "chat-1"}, false)
 
 	err := s.Prompt(context.Background(), "hi")
 	if err == nil || !strings.Contains(err.Error(), "model refused") {
@@ -288,5 +289,48 @@ func TestPromptForwardsNonJSONAndReportsErrorResult(t *testing.T) {
 	events := sink.snapshot()
 	if len(events) != 2 || events[0].Type != "stdout" || string(events[0].Data) != `"warming up"` || events[1].Type != "result" {
 		t.Errorf("events = %+v, want a stdout event with the line as a JSON string, then the result", events)
+	}
+}
+
+func TestPromptPassesTrustOnlyWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		name  string
+		trust bool
+	}{
+		{name: "configured", trust: true},
+		{name: "not configured"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			state := useState(t)
+			sink := &recorder{t: t}
+			s, id := start(t, fakeAgent, sink, backend.StartOptions{Dir: dir}, tt.trust)
+			err := s.Prompt(context.Background(), "hello")
+			got := invocations(t, state)
+			want := []string{"-p", "--output-format", "stream-json", "--resume", id, "--workspace", dir, "--", "hello"}
+			if tt.trust {
+				want = []string{"-p", "--trust", "--output-format", "stream-json", "--resume", id, "--workspace", dir, "--", "hello"}
+			}
+			if len(got) != 2 || !reflect.DeepEqual(got[1].Args, want) {
+				t.Fatalf("args = %q, want %q", got[len(got)-1].Args, want)
+			}
+			for _, banned := range []string{"--force", "--yolo", "-f"} {
+				if slices.Contains(got[0].Args, banned) || slices.Contains(got[1].Args, banned) {
+					t.Errorf("args contain %s", banned)
+				}
+			}
+			if tt.trust {
+				if err != nil {
+					t.Fatalf("Prompt: %v", err)
+				}
+				if got := sink.text(); got != "echo: hello" {
+					t.Errorf("text = %q, want %q", got, "echo: hello")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "Workspace Trust Required") || !strings.Contains(err.Error(), "Pass --trust, --yolo, or -f") {
+				t.Fatalf("Prompt = %v, want the workspace trust refusal", err)
+			}
+		})
 	}
 }

@@ -143,6 +143,13 @@ func (d *Daemon) runCall(ctx context.Context, req ipc.Request) (store.Run, error
 		if strings.TrimSpace(req.Prompt) == "" {
 			return store.Run{}, invalid("the prompt is empty")
 		}
+		run, err := d.store.GetRun(ctx, id)
+		if err != nil {
+			return store.Run{}, err
+		}
+		if err := d.rejectUntrustedPrint(run.Backend); err != nil {
+			return store.Run{}, err
+		}
 		return d.command(ctx, id, lifecycle.FollowUp{Prompt: req.Prompt})
 	case ipc.MethodStop:
 		return d.command(ctx, id, lifecycle.Stop{})
@@ -173,6 +180,9 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	}
 	if d.backends[kind] == nil {
 		return store.Run{}, invalid(fmt.Sprintf("backend %q is not available", kind))
+	}
+	if err := d.rejectUntrustedPrint(kind); err != nil {
+		return store.Run{}, err
 	}
 	id, err := newRunID()
 	if err != nil {
@@ -324,6 +334,15 @@ func ipcError(err error) *ipc.Error {
 
 func invalid(msg string) error {
 	return &ipc.Error{Code: ipc.CodeInvalid, Message: msg}
+}
+
+const untrustedPrint = `the print backend needs "trustWorktree": true in config.json; agent -p refuses an untrusted workspace, and each run uses a new worktree`
+
+func (d *Daemon) rejectUntrustedPrint(kind backend.Kind) error {
+	if kind != backend.Print || d.cfg.TrustWorktree {
+		return nil
+	}
+	return invalid(untrustedPrint)
 }
 
 func newRunID() (store.RunID, error) {

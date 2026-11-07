@@ -54,7 +54,8 @@ func TestLoadFullFile(t *testing.T) {
 		"socketPath": "/tmp/clb.sock",
 		"worktreeDir": "/tmp/worktrees",
 		"webhook": {"url": "https://example.com/hook", "secret": "s3cret"},
-		"storeAllEvents": true
+		"storeAllEvents": true,
+		"trustWorktree": true
 	}`)
 	got, err := Load(home)
 	if err != nil {
@@ -69,12 +70,34 @@ func TestLoadFullFile(t *testing.T) {
 		WorktreeDir:    "/tmp/worktrees",
 		Webhook:        Webhook{URL: "https://example.com/hook", Secret: "s3cret"},
 		StoreAllEvents: true,
+		TrustWorktree:  true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	if got.DBPath() != filepath.Join(home, "clb.db") || got.LogDir() != filepath.Join(home, "logs") {
 		t.Fatalf("paths db=%s logs=%s", got.DBPath(), got.LogDir())
+	}
+}
+
+func TestLoadTrustWorktree(t *testing.T) {
+	home := testHome(t)
+	writeConfig(t, home, `{"trustWorktree": false}`)
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TrustWorktree {
+		t.Fatal("TrustWorktree = true, want false")
+	}
+
+	writeConfig(t, home, `{"trustWorktree": true}`)
+	got, err = Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.TrustWorktree {
+		t.Fatal("TrustWorktree = false, want true")
 	}
 }
 

@@ -550,6 +550,91 @@ func TestLogsFollowEndsWhenTheRunStops(t *testing.T) {
 	}
 }
 
+const printTrustMessage = `the print backend needs "trustWorktree": true in config.json; agent -p refuses an untrusted workspace, and each run uses a new worktree`
+
+func TestPrintBackendNeedsTrustWorktree(t *testing.T) {
+	t.Run("launch and followup", func(t *testing.T) {
+		agent := &fakeAgent{}
+		h := newHarnessBackends(t, agent, daemon.Backends{backend.Print: agent.newSession})
+		_, err := h.call(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Prompt: "hi", Backend: string(backend.Print)})
+		assertInvalidMessage(t, err, printTrustMessage)
+		if runs := h.list(); len(runs) != 0 {
+			t.Fatalf("rejected launch created %+v", runs)
+		}
+
+		run := h.launch("hello")
+		if done := h.waitStatus(run.ID, "finished"); done.Summary != "echo: hello" || done.Backend != string(backend.ACP) {
+			t.Errorf("acp launch = %+v", done)
+		}
+	})
+
+	t.Run("followup", func(t *testing.T) {
+		agent := &fakeAgent{}
+		h := newHarnessBackends(t, agent, daemon.Backends{backend.Print: agent.newSession})
+		now := time.Now().UTC()
+		id := store.RunID("run-printed00")
+		if err := h.store.CreateRun(context.Background(), store.Run{
+			ID:        id,
+			Repo:      h.repo,
+			BaseRef:   "HEAD",
+			Branch:    "clb/" + string(id),
+			Worktree:  filepath.Join(h.cfg.WorktreeDir, string(id)),
+			Backend:   backend.Print,
+			Lifecycle: lifecycle.Run{State: lifecycle.Finished},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		before := h.agent.count()
+		_, err := h.call(ipc.Request{Method: ipc.MethodFollowUp, RunID: string(id), Prompt: "more"})
+		assertInvalidMessage(t, err, printTrustMessage)
+		if got := h.agent.count(); got != before {
+			t.Errorf("agent sessions = %d, want %d", got, before)
+		}
+	})
+
+	t.Run("default backend", func(t *testing.T) {
+		agent := &fakeAgent{}
+		h := newHarnessBackends(t, agent, daemon.Backends{backend.Print: agent.newSession}, func(cfg *config.Config) {
+			cfg.Backend = backend.Print
+		})
+		_, err := h.call(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Prompt: "hi"})
+		assertInvalidMessage(t, err, printTrustMessage)
+	})
+
+	t.Run("trusted", func(t *testing.T) {
+		agent := &fakeAgent{}
+		h := newHarnessBackends(t, agent, daemon.Backends{backend.Print: agent.newSession}, func(cfg *config.Config) {
+			cfg.TrustWorktree = true
+			cfg.Backend = backend.Print
+		})
+		run := h.launch("hi")
+		if run.Backend != string(backend.Print) {
+			t.Fatalf("backend = %s, want print", run.Backend)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Summary != "echo: hi" {
+			t.Errorf("summary = %q, want %q", done.Summary, "echo: hi")
+		}
+		if resumed := h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "again"}); resumed.Status != "queued" {
+			t.Errorf("followup status = %s, want queued", resumed.Status)
+		}
+		done = h.waitStatus(run.ID, "finished")
+		if done.Summary != "echo: again" || done.SessionID == "" {
+			t.Errorf("after followup = %+v", done)
+		}
+	})
+}
+
+func assertInvalidMessage(t *testing.T, err error, message string) {
+	t.Helper()
+	var ie *ipc.Error
+	if !errors.As(err, &ie) || ie.Code != ipc.CodeInvalid || ie.Message != message {
+		t.Fatalf("err = %v, want invalid: %s", err, message)
+	}
+}
+
 func TestCallErrors(t *testing.T) {
 	h := newHarness(t, &fakeAgent{})
 	notRepo := t.TempDir()
@@ -595,16 +680,21 @@ func TestListShowsEveryRunNewestFirst(t *testing.T) {
 }
 
 type harness struct {
-	t     *testing.T
-	cfg   config.Config
-	repo  string
-	store *store.Store
-	agent *fakeAgent
-	hooks *hookServer
-	stop  func()
+	t        *testing.T
+	cfg      config.Config
+	repo     string
+	store    *store.Store
+	agent    *fakeAgent
+	hooks    *hookServer
+	backends daemon.Backends
+	stop     func()
 }
 
 func newHarness(t *testing.T, agent *fakeAgent, edit ...func(*config.Config)) *harness {
+	return newHarnessBackends(t, agent, nil, edit...)
+}
+
+func newHarnessBackends(t *testing.T, agent *fakeAgent, extra daemon.Backends, edit ...func(*config.Config)) *harness {
 	t.Helper()
 	// macOS limits unix socket paths to 104 bytes and t.TempDir is long there.
 	home, err := os.MkdirTemp("", "clb")
@@ -625,6 +715,10 @@ func newHarness(t *testing.T, agent *fakeAgent, edit ...func(*config.Config)) *h
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	h := &harness{t: t, cfg: cfg, repo: gitRepo(t), store: st, agent: agent, hooks: newHookServer(t)}
+	h.backends = daemon.Backends{backend.ACP: agent.newSession}
+	for kind, fn := range extra {
+		h.backends[kind] = fn
+	}
 	h.serve(h.newDaemon())
 	return h
 }
@@ -632,7 +726,7 @@ func newHarness(t *testing.T, agent *fakeAgent, edit ...func(*config.Config)) *h
 func (h *harness) newDaemon() *daemon.Daemon {
 	return daemon.New(daemon.Options{
 		Store:    h.store,
-		Backends: daemon.Backends{backend.ACP: h.agent.newSession},
+		Backends: h.backends,
 		Config:   h.cfg,
 		Webhook:  h.hooks.sender(),
 		Logger:   slog.New(slog.NewTextHandler(h.t.Output(), nil)),

@@ -39,6 +39,10 @@ type Config struct {
 	// StoreAllEvents stores every agent event. Default false omits
 	// agent_thought_chunk and available_commands_update from the run log.
 	StoreAllEvents bool `json:"storeAllEvents"`
+	// TrustWorktree passes --trust to agent -p when true. Print mode refuses
+	// a workspace the CLI has not trusted, and each run uses a new worktree.
+	// Default false rejects a print launch or followup instead.
+	TrustWorktree bool `json:"trustWorktree"`
 }
 
 // Webhook configures completion notifications.

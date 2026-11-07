@@ -9,6 +9,7 @@ import (
 
 type printOptions struct {
 	model, format, resume, workspace string
+	trust                            bool
 }
 
 func createChat() error {
@@ -24,6 +25,9 @@ func createChat() error {
 }
 
 func runPrint(o printOptions, prompt string) error {
+	if !o.trust {
+		refuseUntrusted(o.workspace)
+	}
 	if o.format != "stream-json" {
 		return fmt.Errorf("unsupported --output-format %q", o.format)
 	}
@@ -87,4 +91,24 @@ func runPrint(o printOptions, prompt string) error {
 		return err
 	}
 	return emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": reply})
+}
+
+func refuseUntrusted(dir string) {
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	fmt.Fprintf(os.Stderr, `⚠ Workspace Trust Required
+
+  Cursor Agent can execute code and access files in this directory.
+  Do you trust the contents of this directory?
+
+    %s
+
+  To proceed, you can either:
+    • Run 'agent' interactively to decide
+    • Pass --trust, --yolo, or -f if you trust this directory
+`, dir)
+	os.Exit(1)
 }

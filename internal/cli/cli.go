@@ -118,7 +118,7 @@ func runDaemon(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Store: st,
 		Backends: daemon.Backends{
 			backend.ACP:   func(s backend.Sink) daemon.Session { return acp.New(cfg.AgentPath, s) },
-			backend.Print: func(s backend.Sink) daemon.Session { return stream.New(cfg.AgentPath, s) },
+			backend.Print: func(s backend.Sink) daemon.Session { return stream.New(cfg.AgentPath, s, cfg.TrustWorktree) },
 		},
 		Config:  cfg,
 		Webhook: newSender(cfg.Webhook),

@@ -29,6 +29,9 @@ var errClosed = errors.New("stream session closed")
 type Session struct {
 	agentPath string
 	sink      backend.Sink
+	// trust passes --trust to agent -p. --force, --yolo, and -f also get past
+	// the trust prompt, and they turn approvals off, so they are not used.
+	trust bool
 
 	dir, model, chatID string
 
@@ -37,8 +40,8 @@ type Session struct {
 	running *proc.Process
 }
 
-func New(agentPath string, sink backend.Sink) *Session {
-	return &Session{agentPath: agentPath, sink: sink}
+func New(agentPath string, sink backend.Sink, trust bool) *Session {
+	return &Session{agentPath: agentPath, sink: sink, trust: trust}
 }
 
 // Start creates a chat with "agent create-chat", or adopts
@@ -100,7 +103,11 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	if s.chatID == "" {
 		return errors.New("stream: no chat; Start has not succeeded")
 	}
-	args := []string{"-p", "--output-format", "stream-json"}
+	args := []string{"-p"}
+	if s.trust {
+		args = append(args, "--trust")
+	}
+	args = append(args, "--output-format", "stream-json")
 	if s.model != "" {
 		args = append(args, "--model", s.model)
 	}
