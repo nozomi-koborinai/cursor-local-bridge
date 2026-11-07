@@ -184,11 +184,22 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 		edit(&run)
 	}
 	run.UpdatedAt = time.Now().UTC()
-	if err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
+	var status []store.NewEvent
+	if changed {
+		data, err := json.Marshal(statusData{Status: next.State, Error: next.Error})
+		if err != nil {
+			return run, err
+		}
+		status = []store.NewEvent{{Time: run.UpdatedAt, Type: eventStatus, Data: data}}
+	}
+	appended, err := a.d.store.UpdateRun(a.d.writes, run, status...)
+	if err != nil {
 		return run, err
 	}
+	for _, e := range appended {
+		a.appendNDJSON(e)
+	}
 	if changed {
-		a.appendEvent(eventStatus, statusData{Status: next.State, Error: next.Error})
 		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
 	}
 	return run, a.perform(run, effects)
@@ -464,6 +475,10 @@ func (a *actor) appendEvent(typ string, data any) {
 		a.d.log.Error("append event", "run", a.id, "type", typ, "err", err)
 		return
 	}
+	a.appendNDJSON(e)
+}
+
+func (a *actor) appendNDJSON(e store.Event) {
 	if err := a.d.appendLog(e); err != nil {
 		a.d.log.Warn("append to NDJSON log", "run", a.id, "err", err)
 	}

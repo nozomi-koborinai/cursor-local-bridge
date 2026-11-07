@@ -134,13 +134,28 @@ func (s *Store) ListRuns(ctx context.Context) ([]Run, error) {
 	return out, nil
 }
 
-// UpdateRun overwrites every mutable column of the stored run with r.
-func (s *Store) UpdateRun(ctx context.Context, r Run) error {
+// NewEvent is an event to append to a run's log. The store assigns its Seq.
+type NewEvent struct {
+	Time time.Time
+	Type string
+	Data json.RawMessage
+}
+
+// UpdateRun overwrites every mutable column of the stored run with r and
+// appends events to its log in the same transaction, so a reader that sees
+// the new row also sees the events. It returns the appended events.
+func (s *Store) UpdateRun(ctx context.Context, r Run, events ...NewEvent) ([]Event, error) {
 	row, err := encodeRun(r)
 	if err != nil {
-		return fmt.Errorf("update run %s: %w", r.ID, err)
+		return nil, fmt.Errorf("update run %s: %w", r.ID, err)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("update run %s: %w", r.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET
 			repo = ?, base_ref = ?, branch = ?, worktree = ?, backend = ?, model = ?, session_id = ?,
 			state = ?, prompts = ?, permissions = ?, error = ?, summary = ?, updated_at = ?
@@ -150,49 +165,68 @@ func (s *Store) UpdateRun(ctx context.Context, r Run) error {
 		row.updated, r.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("update run %s: %w", r.ID, err)
+		return nil, fmt.Errorf("update run %s: %w", r.ID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("update run %s: %w", r.ID, err)
+		return nil, fmt.Errorf("update run %s: %w", r.ID, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("update run %s: %w", r.ID, ErrNotFound)
+		return nil, fmt.Errorf("update run %s: %w", r.ID, ErrNotFound)
 	}
-	return nil
+	var appended []Event
+	for _, e := range events {
+		stored, err := insertEvent(ctx, tx, r.ID, e)
+		if err != nil {
+			return nil, fmt.Errorf("update run %s: %w", r.ID, err)
+		}
+		appended = append(appended, stored)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("update run %s: %w", r.ID, err)
+	}
+	return appended, nil
 }
 
 // AppendEvent stores an event with the next sequence number for id.
 func (s *Store) AppendEvent(ctx context.Context, id RunID, at time.Time, typ string, data json.RawMessage) (Event, error) {
-	stored, err := eventData(data)
-	if err != nil {
-		return Event{}, fmt.Errorf("append event %s: %w", id, err)
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Event{}, fmt.Errorf("append event %s: %w", id, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?`, id).Scan(&seq); err != nil {
-		return Event{}, fmt.Errorf("append event %s: %w", id, err)
-	}
-	when := formatTime(at)
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO events (run_id, seq, time, type, data) VALUES (?, ?, ?, ?, ?)`,
-		id, seq, when, typ, stored,
-	); err != nil {
+	e, err := insertEvent(ctx, tx, id, NewEvent{Time: at, Type: typ, Data: data})
+	if err != nil {
 		return Event{}, fmt.Errorf("append event %s: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Event{}, fmt.Errorf("append event %s: %w", id, err)
 	}
+	return e, nil
+}
+
+func insertEvent(ctx context.Context, tx *sql.Tx, id RunID, e NewEvent) (Event, error) {
+	stored, err := eventData(e.Data)
+	if err != nil {
+		return Event{}, err
+	}
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE run_id = ?`, id).Scan(&seq); err != nil {
+		return Event{}, err
+	}
+	when := formatTime(e.Time)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO events (run_id, seq, time, type, data) VALUES (?, ?, ?, ?, ?)`,
+		id, seq, when, e.Type, stored,
+	); err != nil {
+		return Event{}, err
+	}
 	parsed, err := parseTime(when)
 	if err != nil {
-		return Event{}, fmt.Errorf("append event %s: %w", id, err)
+		return Event{}, err
 	}
-	return Event{RunID: id, Seq: seq, Time: parsed, Type: typ, Data: json.RawMessage(stored)}, nil
+	return Event{RunID: id, Seq: seq, Time: parsed, Type: e.Type, Data: json.RawMessage(stored)}, nil
 }
 
 // Events returns the events of id with Seq greater than afterSeq, in order.
