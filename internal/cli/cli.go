@@ -139,9 +139,14 @@ func newSender(w config.Webhook) *webhook.Sender {
 	if w.URL == "" {
 		return nil
 	}
+	hdr := make(http.Header, len(w.Headers))
+	for k, v := range w.Headers {
+		hdr.Set(k, v)
+	}
 	return &webhook.Sender{
 		URL:      w.URL,
 		Secret:   []byte(w.Secret),
+		Header:   hdr,
 		Client:   &http.Client{Timeout: 10 * time.Second},
 		Backoff:  time.Second,
 		Attempts: 3,

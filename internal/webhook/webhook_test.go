@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -110,6 +111,136 @@ func TestSendPostsSignedPayload(t *testing.T) {
 		decoded.Summary != payload.Summary || decoded.Error != payload.Error ||
 		!decoded.Timestamp.Equal(payload.Timestamp) {
 		t.Fatalf("payload = %+v", decoded)
+	}
+}
+
+func TestSendExtraHeaders(t *testing.T) {
+	secret := []byte("topsecret")
+	payload := Payload{Event: EventStatusChange, RunID: "run-1", Status: "finished"}
+	var (
+		mu    sync.Mutex
+		got   []byte
+		hdr   http.Header
+		auths []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		if len(auths) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		got = body
+		hdr = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	extra := make(http.Header)
+	extra.Set("Authorization", "Bearer k-123")
+	extra.Set("X-Automation-Key", "k-123")
+	extra.Set(SignatureHeader, "forged")
+	extra.Set("Content-Type", "text/plain")
+	s := Sender{URL: srv.URL, Secret: secret, Header: extra, Backoff: time.Millisecond, Attempts: 2}
+	if err := s.Send(t.Context(), payload); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"Bearer k-123", "Bearer k-123"}; !slices.Equal(auths, want) {
+		t.Fatalf("Authorization per attempt = %q, want %q", auths, want)
+	}
+	if hdr.Get("Authorization") != "Bearer k-123" {
+		t.Fatalf("Authorization = %q", hdr.Get("Authorization"))
+	}
+	if hdr.Get("X-Automation-Key") != "k-123" {
+		t.Fatalf("X-Automation-Key = %q", hdr.Get("X-Automation-Key"))
+	}
+	if hdr.Get("Content-Type") != "application/json" {
+		t.Fatalf("content type = %q", hdr.Get("Content-Type"))
+	}
+	if hdr.Get("User-Agent") != "clb-webhook/1" {
+		t.Fatalf("user agent = %q", hdr.Get("User-Agent"))
+	}
+	if hdr.Get(EventHeader) != payload.Event {
+		t.Fatalf("event = %q", hdr.Get(EventHeader))
+	}
+	raw, err := hex.DecodeString(hdr.Get(DeliveryHeader))
+	if err != nil || len(raw) != 16 {
+		t.Fatalf("delivery = %q", hdr.Get(DeliveryHeader))
+	}
+	if hdr.Get(SignatureHeader) == "forged" || !Verify(secret, got, hdr.Get(SignatureHeader)) {
+		t.Fatalf("signature = %q", hdr.Get(SignatureHeader))
+	}
+}
+
+func TestCheckHeaders(t *testing.T) {
+	const value = "v4lue-s3cret"
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    []string
+	}{
+		{name: "nil"},
+		{
+			name: "valid",
+			headers: map[string]string{
+				"Authorization":      "Bearer " + value,
+				"X-Automation-Key":   value,
+				"X-Request-Id":       "id\t1",
+				"!#$%&'*+-.^_`|~":    value,
+				"Already-Canonical9": value,
+			},
+		},
+		{name: "empty name", headers: map[string]string{"": value}, want: []string{`""`}},
+		{name: "space in name", headers: map[string]string{"Bad Name": value}, want: []string{`"Bad Name"`}},
+		{name: "crlf", headers: map[string]string{"Authorization": value + "\r\n"}, want: []string{`"Authorization"`}},
+		{name: "nul", headers: map[string]string{"X-Request-Id": value + "\x00"}, want: []string{`"X-Request-Id"`}},
+		{name: "other control", headers: map[string]string{"X-Request-Id": value + "\x01"}, want: []string{`"X-Request-Id"`}},
+		{name: "del", headers: map[string]string{"X-Request-Id": value + "\x7f"}, want: []string{`"X-Request-Id"`}},
+		{name: "content-type", headers: map[string]string{"Content-Type": value}, want: []string{`"Content-Type"`}},
+		{name: "user-agent", headers: map[string]string{"User-Agent": value}, want: []string{`"User-Agent"`}},
+		{name: "host", headers: map[string]string{"Host": value}, want: []string{`"Host"`}},
+		{name: "content-length", headers: map[string]string{"Content-Length": value}, want: []string{`"Content-Length"`}},
+		{name: "transfer-encoding", headers: map[string]string{"Transfer-Encoding": value}, want: []string{`"Transfer-Encoding"`}},
+		{name: "lowercase content-type", headers: map[string]string{"content-type": value}, want: []string{`"content-type"`}},
+		{name: "x-clb", headers: map[string]string{"X-Clb-Signature": value}, want: []string{`"X-Clb-Signature"`}},
+		{name: "lowercase x-clb", headers: map[string]string{"x-clb-anything": value}, want: []string{`"x-clb-anything"`}},
+		{
+			name:    "duplicate",
+			headers: map[string]string{"Authorization": value, "authorization": value + "-other"},
+			want:    []string{`headers "Authorization" and "authorization" name the same header`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckHeaders(tt.headers)
+			if len(tt.want) == 0 {
+				if err != nil {
+					t.Fatalf("err = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			for _, sub := range tt.want {
+				if !strings.Contains(msg, sub) {
+					t.Fatalf("err = %v, want substring %s", err, sub)
+				}
+			}
+			if strings.Contains(msg, value) || strings.Contains(msg, value+"-other") {
+				t.Fatalf("err = %v includes the header value", err)
+			}
+		})
 	}
 }
 

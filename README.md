@@ -85,16 +85,21 @@ In this example, Grok Bot drives Cursor Local Bridge for you. Grok Bot runs `clb
 
 1. Keep `clb daemon` running on the machine. To start it at login on macOS, see [Run the daemon with launchd](#run-the-daemon-with-launchd).
 
-2. In Grok Bot, create a routine with a webhook trigger. Put the trigger's URL and a long random secret in `~/.clb/config.json`, then restart the daemon:
+2. In Grok Bot, create a routine with a webhook trigger. The trigger accepts a POST only when it carries the routine's sender key. Copy the trigger's URL and the sender key from the routine's panel into `~/.clb/config.json`, and add a long random secret:
 
    ```json
    {
      "webhook": {
        "url": "<the URL of the routine's webhook trigger>",
-       "secret": "a long random string"
+       "secret": "a long random string",
+       "headers": {
+         "Authorization": "Bearer <the routine's sender key>"
+       }
      }
    }
    ```
+
+   Never paste the sender key into a chat, including a chat with Grok Bot. Anyone who has the key can start the routine. Run `chmod 600 ~/.clb/config.json`, then restart the daemon.
 
 3. Ask Grok Bot for a change. Grok Bot launches a run and keeps the `id` from the JSON that `clb` prints:
 
@@ -262,11 +267,35 @@ The request has these headers:
 
 | Header | Value |
 | --- | --- |
+| `Content-Type` | `application/json` |
+| `User-Agent` | `clb-webhook/1` |
 | `X-Clb-Signature` | `sha256=` and the hex HMAC-SHA256 of the raw body, keyed with `webhook.secret` |
 | `X-Clb-Event` | `statusChange` |
 | `X-Clb-Delivery` | An ID that stays the same when a delivery is retried |
 
 The daemon tries a delivery up to 3 times. It retries on network errors and 5xx responses.
+
+To send more headers, such as a key that the receiver requires, set `webhook.headers`. The daemon adds them to every delivery, retries included:
+
+```json
+"webhook": {
+  "url": "https://example.com/hooks/clb",
+  "secret": "a long random string",
+  "headers": {
+    "Authorization": "Bearer <key>"
+  }
+}
+```
+
+Header names are case-insensitive. `clb` refuses to load a config file whose `webhook.headers` has any of these:
+
+- A name that is not a valid HTTP header name.
+- A value with a control character, such as CR or LF.
+- `Content-Type`, `User-Agent`, or a name that starts with `X-Clb-`. `clb` sets these headers itself.
+- `Host`, `Content-Length`, or `Transfer-Encoding`. Go's HTTP client sets these headers itself and ignores the configured value.
+- Two names that differ only in case.
+
+The error names the header but does not show its value. `clb` does not log header values. The signature covers only the body, so the extra headers do not change it.
 
 To check a signature, compute the HMAC over the exact bytes you received, then compare in constant time:
 
@@ -294,7 +323,10 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
   "trustWorktree": false,
   "webhook": {
     "url": "https://example.com/hooks/clb",
-    "secret": "a long random string"
+    "secret": "a long random string",
+    "headers": {
+      "Authorization": "Bearer <key>"
+    }
   }
 }
 ```
@@ -310,8 +342,11 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
 | `trustWorktree` | `false` | Pass `--trust` to `agent -p`. The `print` backend needs it. See [Backends](#backends). |
 | `webhook.url` | empty | Where to post run status changes. |
 | `webhook.secret` | empty | The HMAC key. Required when `webhook.url` is set. |
+| `webhook.headers` | empty | Header names and values to add to every delivery. See [Webhook](#webhook). |
 
-Relative paths resolve against the home directory. Unknown fields are an error. The config file holds the webhook secret, so run `chmod 600 ~/.clb/config.json`.
+Relative paths resolve against the home directory. Unknown fields are an error.
+
+When `config.json` sets `webhook.secret` or `webhook.headers`, `clb` refuses to load it if the file's mode gives its group or other users any access. Write access counts too, because a user who can change `webhook.url` can collect the headers. Every `clb` command loads the file, so each one fails with the mode it found until you run `chmod 600 ~/.clb/config.json`. `clb` never creates or changes `config.json`.
 
 ## Backends
 
@@ -348,7 +383,7 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 
 ## Security
 
-- The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists.
+- The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists. It refuses a `config.json` that holds a webhook secret or headers and that other users can access. See [Configuration](#configuration).
 - `clb` forwards each permission request that the Cursor CLI sends and answers it only when you run `clb approve` or `clb deny`. It never passes `--force` or `--yolo` to the CLI. It passes `--trust` to `agent -p` only when `trustWorktree` is `true`.
 - Whether the CLI sends a request before it uses a tool depends on the CLI's own settings, not on `clb`. In testing with a logged-in CLI, the agent applied a file edit without sending a request. To block a tool or a path outright, add it to `permissions.deny` in `~/.cursor/cli-config.json` or the project's `.cursor/cli.json`. See [Permissions](https://cursor.com/docs/cli/reference/permissions) in the Cursor CLI docs.
 - `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
