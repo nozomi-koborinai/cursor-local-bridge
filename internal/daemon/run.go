@@ -174,6 +174,12 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	if err != nil {
 		return run, err
 	}
+	return a.applyTo(run, e, edit)
+}
+
+// applyTo applies e to run, the run as this job last left it, stores the
+// result, and performs its effects.
+func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
 	next, effects, err := lifecycle.Apply(run.Lifecycle, e)
 	if err != nil {
 		return run, err
@@ -182,6 +188,11 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	run.Lifecycle = next
 	if edit != nil {
 		edit(&run)
+	}
+	// A stopping run moves on when its RemoveWorktree reports back later in
+	// this job, so the store never holds the state.
+	if next.State == lifecycle.Stopping {
+		return run, a.perform(run, effects)
 	}
 	run.UpdatedAt = time.Now().UTC()
 	var status []store.NewEvent
@@ -228,10 +239,8 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 		case lifecycle.CloseBackend:
 			a.closeBackend()
 		case lifecycle.RemoveWorktree:
-			a.awaitClosed()
-			proc.EndUnder(run.Worktree)
-			if err := worktree.Remove(a.d.ctx, run.Repo, run.Worktree); err != nil {
-				errs = append(errs, fmt.Errorf("remove worktree: %w", err))
+			if err := a.removeWorktree(run); err != nil {
+				errs = append(errs, err)
 			}
 		case lifecycle.Notify:
 			a.notify(run, eff.State)
@@ -240,6 +249,31 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Removal runs under a.d.writes, so a stop that races shutdown still removes
+// the worktree. removeTimeout keeps such a removal from holding up Serve
+// indefinitely.
+const removeTimeout = time.Minute
+
+// removeWorktree removes the run's worktree and applies the outcome in the
+// same job, so that no other command acts on the run in between. It returns
+// the removal's error, if any, for the caller of the command.
+func (a *actor) removeWorktree(run store.Run) error {
+	a.awaitClosed()
+	proc.EndUnder(run.Worktree)
+	ctx, cancel := context.WithTimeout(a.d.writes, removeTimeout)
+	err := worktree.Remove(ctx, run.Repo, run.Worktree)
+	cancel()
+	var outcome lifecycle.Event = lifecycle.WorktreeRemoved{}
+	if err != nil {
+		err = fmt.Errorf("remove worktree: %w", err)
+		outcome = lifecycle.WorktreeRemoveFailed{Err: err.Error()}
+	}
+	if _, applyErr := a.applyTo(run, outcome, nil); applyErr != nil {
+		return errors.Join(err, applyErr)
+	}
+	return err
 }
 
 // startBackend creates the worktree on the run's goroutine, so a stop can
