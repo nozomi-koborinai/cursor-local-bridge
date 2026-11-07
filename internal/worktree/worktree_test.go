@@ -404,6 +404,22 @@ func TestAddRejectsABaseRefThatIsNotACommit(t *testing.T) {
 	}
 }
 
+// git update-ref accepts a branch named "-q", which worktree add would read
+// as its quiet flag and then start the branch at HEAD.
+func TestAddStartsAtABaseRefThatLooksLikeAFlag(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	gitOut(t, repo, "commit", "--allow-empty", "-m", "second")
+	gitOut(t, repo, "update-ref", "refs/heads/-q", head)
+	path := filepath.Join(t.TempDir(), "wt")
+	if err := Add(ctx, repo, path, "clb/flag", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOut(t, path, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD = %s, want %s, the commit -q names", got, head)
+	}
+}
+
 func writeHook(t *testing.T, worktree, body string) {
 	t.Helper()
 	hook := gitOut(t, worktree, "rev-parse", "--git-path", "hooks/pre-commit")
