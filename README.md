@@ -1,8 +1,10 @@
-# cursor-local-bridge
+![Cursor Local Bridge](https://github.com/user-attachments/assets/b1e3a49f-e02f-437c-9bf0-012320b2ccd4)
 
-`clb` launches, watches, follows up on, and stops Cursor CLI agents on your own machine. It gives them the lifecycle of a cloud agent: each run has an ID, a status, a queue of follow-up prompts, a git branch, and a webhook that fires when the run ends. A program that can run shell commands, such as an assistant connected over a remote shell, can drive local agents through `clb` the way it would drive cloud agents through an API.
+# Cursor Local Bridge
 
-Use it where Cursor cloud agents are not available.
+Cursor Local Bridge launches, watches, follows up on, and stops Cursor CLI agents on your own machine. Its command is `clb`. It gives each agent the lifecycle of a cloud agent: each run has an ID, a status, a queue of follow-up prompts, a git branch, and a webhook that fires when the run ends. A program that can run shell commands, such as an assistant connected over a remote shell, can drive local agents through `clb` the way it would drive cloud agents through an API.
+
+Use it in environments where cloud agents are not available.
 
 > Status: MVP phase 1. The end-to-end tests run against a fake agent that speaks the same protocol as the Cursor CLI. Some behavior of the real CLI with a logged-in account is not verified yet. See [Known gaps](#known-gaps).
 
@@ -76,6 +78,49 @@ Use it where Cursor cloud agents are not available.
    ```
 
    `clb stop` removes the worktree. The branch `clb/run-3f9a2c7d1e0b` stays, so commits the agent made are kept. Uncommitted changes in the worktree are lost.
+
+## Example: Grok Bot
+
+In this example, Grok Bot drives Cursor Local Bridge for you. Grok Bot runs `clb` commands on your machine through a remote shell, and the daemon tells Grok Bot when a run ends by posting to a routine's webhook trigger. Any assistant that can run shell commands and receive a webhook can follow the same steps.
+
+1. Keep `clb daemon` running on the machine. To start it at login on macOS, see [Run the daemon with launchd](#run-the-daemon-with-launchd).
+
+2. In Grok Bot, create a routine with a webhook trigger. Put the trigger's URL and a long random secret in `~/.clb/config.json`, then restart the daemon:
+
+   ```json
+   {
+     "webhook": {
+       "url": "<the URL of the routine's webhook trigger>",
+       "secret": "a long random string"
+     }
+   }
+   ```
+
+3. Ask Grok Bot for a change. Grok Bot launches a run and keeps the `id` from the JSON that `clb` prints:
+
+   ```sh
+   clb launch --repo ~/src/my-project "Fix the flaky date test in parser_test.go"
+   ```
+
+4. To follow the run, Grok Bot reads its status and its events:
+
+   ```sh
+   clb status run-3f9a2c7d1e0b
+   clb logs run-3f9a2c7d1e0b
+   ```
+
+   `clb logs --follow` blocks until the run is no longer active. If the remote shell limits how long a command can run, poll `clb status` instead. If `status` is `awaiting_permission`, Grok Bot shows you `pendingPermission` and runs `clb approve` or `clb deny` with your answer.
+
+5. To change course, Grok Bot sends a follow-up. To end the run, it stops the run:
+
+   ```sh
+   clb followup run-3f9a2c7d1e0b "Also cover dates before 1970"
+   clb stop run-3f9a2c7d1e0b
+   ```
+
+6. When the run reaches `finished`, `failed`, or `stopped`, the daemon posts the signed payload to the webhook trigger, and the routine runs. The payload has the run's `id`, `status`, `branch`, and `summary`, so the routine can report the result or have Grok Bot send the next follow-up. If the receiver can compute HMAC-SHA256, have it check `X-Clb-Signature` before it acts on the payload. See [Webhook](#webhook).
+
+The daemon sends the webhook from your machine, so the trigger's URL must be reachable from there.
 
 ## Run lifecycle
 
