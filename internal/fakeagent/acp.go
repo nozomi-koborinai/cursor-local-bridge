@@ -156,8 +156,32 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 }
 
 func (a *fakeACP) echo(ctx context.Context, sid acp.SessionId, prompt string) (string, error) {
-	err := a.update(ctx, sid, acp.StartToolCall("read-1", "Read fake file",
-		acp.WithStartKind(acp.ToolKindRead), acp.WithStartStatus(acp.ToolCallStatusCompleted)))
+	// The real CLI sends both of these on a turn, and its first tool_call
+	// can arrive with an empty rawInput that a later update fills in.
+	if err := a.update(ctx, sid, acp.UpdateAgentThoughtText("thinking")); err != nil {
+		return "", err
+	}
+	commands := acp.SessionUpdate{AvailableCommandsUpdate: &acp.SessionAvailableCommandsUpdate{
+		AvailableCommands: []acp.AvailableCommand{{
+			Name:        "create_plan",
+			Description: "Create a plan",
+		}},
+	}}
+	if err := a.update(ctx, sid, commands); err != nil {
+		return "", err
+	}
+	const toolCallID = "read-1"
+	err := a.update(ctx, sid, acp.StartToolCall(toolCallID, "Read fake file",
+		acp.WithStartKind(acp.ToolKindRead),
+		acp.WithStartStatus(acp.ToolCallStatusCompleted),
+		acp.WithStartRawInput(map[string]any{}),
+	))
+	if err != nil {
+		return "", err
+	}
+	err = a.update(ctx, sid, acp.UpdateToolCall(toolCallID,
+		acp.WithUpdateRawInput(map[string]any{"path": "README.md"}),
+	))
 	if err != nil {
 		return "", err
 	}
