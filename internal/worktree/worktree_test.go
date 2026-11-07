@@ -199,6 +199,29 @@ func TestCommitSurvivesRemove(t *testing.T) {
 	}
 }
 
+func TestAddTwiceThroughSymlink(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	real := filepath.Join(t.TempDir(), "wt")
+	const branch = "clb/link"
+	if err := Add(ctx, repo, real, branch, head); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := Add(ctx, repo, link, branch, head); err != nil {
+		t.Fatalf("add via symlink: %v", err)
+	}
+	if got := gitOut(t, link, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD = %s, want %s", got, head)
+	}
+	if gitOut(t, repo, "rev-parse", "--abbrev-ref", "HEAD") != "main" {
+		t.Fatal("main checkout moved")
+	}
+}
+
 func TestAddErrorIncludesGitOutput(t *testing.T) {
 	repo, _ := newRepo(t)
 	path := filepath.Join(t.TempDir(), "wt")
