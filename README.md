@@ -275,6 +275,7 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 
 - The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists.
 - `clb` never approves a permission request on its own and never passes `--force` or `--yolo` to the CLI.
+- `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
 - An agent runs with your user's rights in its worktree. Review what you approve.
 
 ## Known gaps
