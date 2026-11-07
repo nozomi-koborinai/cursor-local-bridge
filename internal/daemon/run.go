@@ -1,0 +1,426 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/worktree"
+)
+
+// Event types the daemon writes next to the agent's own events.
+const (
+	eventStatus              = "status"
+	eventPrompt              = "prompt"
+	eventPermissionRequested = "permission_requested"
+	eventPermissionAnswered  = "permission_answered"
+	eventWebhook             = "webhook"
+)
+
+type statusData struct {
+	Status lifecycle.State `json:"status"`
+	Error  string          `json:"error,omitempty"`
+}
+
+type promptData struct {
+	Prompt string `json:"prompt"`
+}
+
+type permissionAnsweredData struct {
+	ID       string `json:"id"`
+	Approved bool   `json:"approved"`
+}
+
+type webhookData struct {
+	Status    string `json:"status"`
+	Delivered bool   `json:"delivered"`
+	Error     string `json:"error,omitempty"`
+}
+
+// actor owns one run. Its goroutine runs every function sent to inbox, and
+// it is the only writer of the run's row, events, and NDJSON log. The fields
+// after inbox belong to that goroutine.
+type actor struct {
+	d     *Daemon
+	id    store.RunID
+	inbox chan func()
+
+	gen *generation
+	// closing is the last closed generation. Its agent may still be
+	// shutting down.
+	closing *generation
+	perms   int
+}
+
+// generation is one agent session of a run, from StartBackend to
+// CloseBackend. Everything a session reports carries its generation, so
+// reports from a closed session are dropped.
+type generation struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	session Session
+	// closed is closed once the session's Close has returned.
+	closed  chan struct{}
+	turn    strings.Builder
+	answers map[string]chan<- bool
+}
+
+func (a *actor) loop() {
+	for {
+		select {
+		case f := <-a.inbox:
+			if a.d.ctx.Err() != nil {
+				return
+			}
+			f()
+		case <-a.d.ctx.Done():
+			return
+		}
+	}
+}
+
+// post queues f for the run's goroutine. It reports false once the daemon
+// is stopping.
+func (a *actor) post(f func()) bool {
+	select {
+	case a.inbox <- f:
+		return true
+	case <-a.d.ctx.Done():
+		return false
+	}
+}
+
+var errStopping = errors.New("the daemon is shutting down")
+
+// call runs f on the run's goroutine and returns the run as stored after f.
+func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
+	type result struct {
+		run store.Run
+		err error
+	}
+	done := make(chan result, 1)
+	job := func() {
+		if err := f(); err != nil {
+			done <- result{err: err}
+			return
+		}
+		run, err := a.d.store.GetRun(a.d.writes, a.id)
+		done <- result{run, err}
+	}
+	select {
+	case a.inbox <- job:
+	case <-ctx.Done():
+		return store.Run{}, ctx.Err()
+	case <-a.d.ctx.Done():
+		return store.Run{}, errStopping
+	}
+	select {
+	case r := <-done:
+		return r.run, r.err
+	case <-ctx.Done():
+		return store.Run{}, ctx.Err()
+	case <-a.d.ctx.Done():
+		return store.Run{}, errStopping
+	}
+}
+
+func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
+	if err := a.d.store.CreateRun(a.d.writes, run); err != nil {
+		return err
+	}
+	a.appendEvent(eventStatus, statusData{Status: run.Lifecycle.State})
+	a.d.log.Info("run launched", "run", run.ID, "repo", run.Repo, "backend", run.Backend)
+	return a.perform(run, effects)
+}
+
+// apply moves the run through e, stores the result with edit applied, and
+// performs the transition's effects.
+func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		return run, err
+	}
+	next, effects, err := lifecycle.Apply(run.Lifecycle, e)
+	if err != nil {
+		return run, err
+	}
+	changed := next.State != run.Lifecycle.State
+	run.Lifecycle = next
+	if edit != nil {
+		edit(&run)
+	}
+	run.UpdatedAt = time.Now().UTC()
+	if err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
+		return run, err
+	}
+	if changed {
+		a.appendEvent(eventStatus, statusData{Status: next.State, Error: next.Error})
+		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
+	}
+	return run, a.perform(run, effects)
+}
+
+// record applies a transition reported by an agent session or a goroutine
+// the actor started. Nobody waits for the result, so errors are logged.
+func (a *actor) record(e lifecycle.Event, edit func(*store.Run)) {
+	if _, err := a.apply(e, edit); err != nil {
+		a.d.log.Error("apply run event", "run", a.id, "event", fmt.Sprintf("%T", e), "err", err)
+	}
+}
+
+func (a *actor) fail(err error) {
+	a.record(lifecycle.BackendFailed{Err: err.Error()}, nil)
+}
+
+func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
+	var errs []error
+	for _, eff := range effects {
+		switch eff := eff.(type) {
+		case lifecycle.StartBackend:
+			a.startBackend(run, eff.Resume)
+		case lifecycle.SendPrompt:
+			a.sendPrompt(eff.Prompt)
+		case lifecycle.AnswerPermission:
+			a.answerPermission(eff)
+		case lifecycle.CloseBackend:
+			a.closeBackend()
+		case lifecycle.RemoveWorktree:
+			a.awaitClosed()
+			if err := worktree.Remove(a.d.ctx, run.Repo, run.Worktree); err != nil {
+				errs = append(errs, fmt.Errorf("remove worktree: %w", err))
+			}
+		case lifecycle.Notify:
+			a.notify(run, eff.State)
+		default:
+			panic(fmt.Sprintf("daemon: unhandled effect %T", eff))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// startBackend creates the worktree on the run's goroutine, so a stop can
+// never interleave with it, then starts the session in the background. The
+// goroutine that starts the session also closes it when its generation ends.
+func (a *actor) startBackend(run store.Run, resume bool) {
+	a.awaitClosed()
+	if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
+		a.fail(fmt.Errorf("create worktree: %w", err))
+		return
+	}
+	newSession := a.d.backends[run.Backend]
+	if newSession == nil {
+		a.fail(fmt.Errorf("backend %q is not available", run.Backend))
+		return
+	}
+	ctx, cancel := context.WithCancel(a.d.ctx)
+	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
+	g.session = newSession(sink{a: a, g: g})
+	a.gen = g
+
+	opts := backend.StartOptions{Dir: run.Worktree, Model: run.Model}
+	if resume {
+		opts.ResumeSessionID = run.SessionID
+	}
+	a.d.wg.Go(func() {
+		defer close(g.closed)
+		sessionID, err := g.session.Start(ctx, opts)
+		a.post(func() { a.started(g, sessionID, err) })
+		<-ctx.Done()
+		if err := g.session.Close(); err != nil {
+			a.d.log.Warn("close agent session", "run", a.id, "err", err)
+		}
+	})
+}
+
+func (a *actor) started(g *generation, sessionID string, err error) {
+	if g != a.gen {
+		return
+	}
+	if err != nil {
+		a.fail(fmt.Errorf("start agent: %w", err))
+		return
+	}
+	a.record(lifecycle.Started{}, func(r *store.Run) { r.SessionID = sessionID })
+}
+
+func (a *actor) sendPrompt(prompt string) {
+	g := a.gen
+	a.appendEvent(eventPrompt, promptData{Prompt: prompt})
+	g.turn.Reset()
+	a.d.wg.Go(func() {
+		err := g.session.Prompt(g.ctx, prompt)
+		a.post(func() { a.promptDone(g, err) })
+	})
+}
+
+func (a *actor) promptDone(g *generation, err error) {
+	if g != a.gen {
+		return
+	}
+	if err != nil {
+		a.fail(fmt.Errorf("prompt agent: %w", err))
+		return
+	}
+	summary := g.turn.String()
+	a.record(lifecycle.TurnEnded{}, func(r *store.Run) { r.Summary = summary })
+}
+
+func (a *actor) agentEvent(g *generation, e backend.Event) {
+	if g != a.gen {
+		return
+	}
+	a.appendEvent(e.Type, e.Data)
+	g.turn.WriteString(e.Text)
+}
+
+func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
+	if g != a.gen {
+		return
+	}
+	p := lifecycle.Permission{ID: a.nextPermissionID(), Title: req.Title, ToolCall: req.ToolCall}
+	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
+	if err != nil || run.Lifecycle.State != lifecycle.AwaitingPermission {
+		answer <- false
+		return
+	}
+	g.answers[p.ID] = answer
+	a.appendEvent(eventPermissionRequested, p)
+}
+
+// nextPermissionID numbers permissions per run. The count starts from the
+// stored events, so IDs stay unique across daemon restarts.
+func (a *actor) nextPermissionID() string {
+	if a.perms == 0 {
+		events, err := a.d.store.Events(a.d.writes, a.id, 0)
+		if err != nil {
+			a.d.log.Error("count permissions", "run", a.id, "err", err)
+		}
+		for _, e := range events {
+			if e.Type == eventPermissionRequested {
+				a.perms++
+			}
+		}
+	}
+	a.perms++
+	return fmt.Sprintf("perm-%d", a.perms)
+}
+
+func (a *actor) answerPermission(eff lifecycle.AnswerPermission) {
+	if a.gen != nil {
+		if answer, ok := a.gen.answers[eff.ID]; ok {
+			answer <- eff.Approve
+			delete(a.gen.answers, eff.ID)
+		}
+	}
+	a.appendEvent(eventPermissionAnswered, permissionAnsweredData{ID: eff.ID, Approved: eff.Approve})
+}
+
+func (a *actor) closeBackend() {
+	if a.gen != nil {
+		a.gen.cancel()
+		a.closing = a.gen
+		a.gen = nil
+	}
+}
+
+// closeWait bounds the wait for a closed session's agent to exit. Closing an
+// agent takes at most a few seconds unless its backend ignores cancellation.
+const closeWait = 10 * time.Second
+
+// awaitClosed waits until the agent of the last closed session has exited,
+// so that no agent is still running in the worktree when it is removed or
+// when a resumed session starts there.
+func (a *actor) awaitClosed() {
+	g := a.closing
+	if g == nil {
+		return
+	}
+	a.closing = nil
+	timer := time.NewTimer(closeWait)
+	defer timer.Stop()
+	select {
+	case <-g.closed:
+	case <-timer.C:
+		a.d.log.Warn("agent session still closing; continuing", "run", a.id)
+	case <-a.d.ctx.Done():
+	}
+}
+
+func (a *actor) notify(run store.Run, state lifecycle.State) {
+	if a.d.webhook == nil {
+		return
+	}
+	p := webhook.Payload{
+		Event:     webhook.EventStatusChange,
+		Timestamp: time.Now().UTC(),
+		RunID:     string(run.ID),
+		Status:    string(state),
+		Repo:      run.Repo,
+		Branch:    run.Branch,
+		Summary:   run.Summary,
+		Error:     run.Lifecycle.Error,
+	}
+	a.d.wg.Go(func() {
+		err := a.d.webhook.Send(a.d.ctx, p)
+		a.post(func() { a.delivered(p.Status, err) })
+	})
+}
+
+func (a *actor) delivered(status string, err error) {
+	data := webhookData{Status: status, Delivered: err == nil}
+	if err != nil {
+		data.Error = err.Error()
+		a.d.log.Warn("deliver webhook", "run", a.id, "status", status, "err", err)
+	}
+	a.appendEvent(eventWebhook, data)
+}
+
+// appendEvent appends an event to the run's log in the store and then to its
+// NDJSON file. A failure is logged and does not stop the run.
+func (a *actor) appendEvent(typ string, data any) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		a.d.log.Error("encode event", "run", a.id, "type", typ, "err", err)
+		return
+	}
+	e, err := a.d.store.AppendEvent(a.d.writes, a.id, time.Now().UTC(), typ, raw)
+	if err != nil {
+		a.d.log.Error("append event", "run", a.id, "type", typ, "err", err)
+		return
+	}
+	if err := a.d.appendLog(e); err != nil {
+		a.d.log.Warn("append to NDJSON log", "run", a.id, "err", err)
+	}
+}
+
+// sink hands one generation's session output to the run's goroutine.
+type sink struct {
+	a *actor
+	g *generation
+}
+
+func (s sink) Event(e backend.Event) {
+	s.a.post(func() { s.a.agentEvent(s.g, e) })
+}
+
+func (s sink) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
+	answer := make(chan bool, 1)
+	if !s.a.post(func() { s.a.permissionAsked(s.g, req, answer) }) {
+		return false, errStopping
+	}
+	select {
+	case approve := <-answer:
+		return approve, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-s.g.ctx.Done():
+		return false, errors.New("the agent session was closed")
+	}
+}
