@@ -1,6 +1,6 @@
-![Cursor Local Bridge](https://github.com/user-attachments/assets/0be6bacb-d6e3-492a-be27-8dab27d55f6b)
-
 # Cursor Local Bridge
+
+![Cursor Local Bridge](https://github.com/user-attachments/assets/0be6bacb-d6e3-492a-be27-8dab27d55f6b)
 
 Cursor Local Bridge launches, watches, follows up on, and stops Cursor CLI agents on your own machine. Its command is `clb`. It gives each agent the lifecycle of a cloud agent: each run has an ID, a status, a queue of follow-up prompts, a git branch, and a webhook that fires when the run ends. A program that can run shell commands, such as an assistant connected over a remote shell, can drive local agents through `clb` the way it would drive cloud agents through an API.
 
