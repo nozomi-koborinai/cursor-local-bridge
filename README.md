@@ -13,7 +13,7 @@ Use it in environments where cloud agents are not available.
 - `clb daemon` runs in the background and listens on a unix socket that only your user can open.
 - `clb launch` creates a run. The daemon adds a git worktree for the run on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com).
 - The daemon stores every run and every event the agent streams in SQLite. When a follow-up resumes a session, the history the agent replays is not stored again. It also writes each run's events to an NDJSON file that you can `tail -f`.
-- When the agent asks for permission to run a tool, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`. Nothing is approved by default.
+- When the Cursor CLI sends a permission request, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`, and `clb` passes your answer back. Whether the CLI asks before it uses a tool depends on the CLI's own settings. It can apply a file edit without asking. See [Security](#security).
 - When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if you configured one.
 
 `clb` uses the login of the Cursor CLI on your machine. It does not need or accept an API key.
@@ -130,7 +130,7 @@ A run is in exactly one of these states.
 | --- | --- |
 | `queued` | The daemon is creating the worktree and starting the agent. |
 | `running` | The agent is working on a prompt. |
-| `awaiting_permission` | The agent is blocked until you approve or deny a tool call. |
+| `awaiting_permission` | The agent sent a permission request for a tool call and waits until you approve or deny it. |
 | `finished` | The agent ended its turn and no prompts are queued. The daemon closes the agent process, and a follow-up starts a new one. |
 | `failed` | The agent process failed. `error` says why. |
 | `stopped` | You stopped the run. Its worktree is removed. |
@@ -287,7 +287,7 @@ Relative paths resolve against the home directory. Unknown fields are an error. 
 
 ## Backends
 
-- `acp`, the default, runs `agent acp` and talks to it over the Agent Client Protocol on stdio. One agent process serves a run until the run finishes. Permission requests reach you through `awaiting_permission`.
+- `acp`, the default, runs `agent acp` and talks to it over the Agent Client Protocol on stdio. One agent process serves a run until the run finishes. The permission requests the CLI sends reach you through `awaiting_permission`.
 - `print` runs `agent -p --output-format stream-json --resume <chat id>` once per prompt. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
 
 ## Run the daemon with launchd
@@ -319,15 +319,17 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 ## Security
 
 - The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists.
-- `clb` never approves a permission request on its own and never passes `--force` or `--yolo` to the CLI.
+- `clb` forwards each permission request that the Cursor CLI sends and answers it only when you run `clb approve` or `clb deny`. It never passes `--force` or `--yolo` to the CLI.
+- Whether the CLI sends a request before it uses a tool depends on the CLI's own settings, not on `clb`. In testing with a logged-in CLI, the agent applied a file edit without sending a request. To block a tool or a path outright, add it to `permissions.deny` in `~/.cursor/cli-config.json` or the project's `.cursor/cli.json`. See [Permissions](https://cursor.com/docs/cli/reference/permissions) in the Cursor CLI docs.
 - `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
-- An agent runs with your user's rights in its worktree. Review what you approve.
+- An agent runs with your user's rights in its worktree. Review the run's branch before you merge it.
 
 ## Known gaps
 
-These parts are tested against the fake agent only:
+A run against a logged-in Cursor CLI streamed events and applied a file edit. These parts are tested against the fake agent only:
 
-- Authentication, prompt turns, permission requests, and `session/load` with a logged-in Cursor CLI.
+- Permission requests from the real CLI, and the options they offer.
+- Resuming a session with `session/load` after a run finishes.
 - Whether `--model` changes the model in `agent acp`.
 - The exact stream-json output of `agent -p`.
 
