@@ -23,6 +23,13 @@ const (
 	eventWebhook             = "webhook"
 )
 
+// Thought chunks and available-command updates repeat on every turn and
+// bloat the run log. Backends still forward them.
+var unstoredEvents = map[string]bool{
+	"agent_thought_chunk":       true,
+	"available_commands_update": true,
+}
+
 type statusData struct {
 	Status lifecycle.State `json:"status"`
 	Error  string          `json:"error,omitempty"`
@@ -273,7 +280,9 @@ func (a *actor) promptDone(g *generation, err error) {
 }
 
 func (a *actor) agentEvent(g *generation, e backend.Event) {
-	a.appendEvent(e.Type, e.Data)
+	if a.d.cfg.StoreAllEvents || !unstoredEvents[e.Type] {
+		a.appendEvent(e.Type, e.Data)
+	}
 	g.turn.WriteString(e.Text)
 }
 

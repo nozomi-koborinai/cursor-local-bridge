@@ -36,6 +36,9 @@ type Config struct {
 	WorktreeDir string `json:"worktreeDir"`
 	// Webhook is optional. Secret is required when URL is set.
 	Webhook Webhook `json:"webhook"`
+	// StoreAllEvents stores every agent event. Default false omits
+	// agent_thought_chunk and available_commands_update from the run log.
+	StoreAllEvents bool `json:"storeAllEvents"`
 }
 
 // Webhook configures completion notifications.
