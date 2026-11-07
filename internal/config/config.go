@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +71,8 @@ func DefaultHome() (string, error) {
 
 // Load reads <home>/config.json if it exists, rejects unknown fields and
 // invalid values, and fills defaults. A missing file yields the defaults.
+// Load refuses a file other users can access when it holds webhook.secret
+// or webhook.headers.
 func Load(home string) (Config, error) {
 	path := filepath.Join(home, "config.json")
 	cfg, err := readConfig(path, home)
@@ -96,14 +97,19 @@ func (c Config) LogDir() string {
 
 func readConfig(path, home string) (Config, error) {
 	cfg := defaults(home)
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
 	}
 	if err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	dec := json.NewDecoder(f)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", path, err)
@@ -117,6 +123,11 @@ func readConfig(path, home string) (Config, error) {
 	}
 	cfg.SocketPath = resolvePath(home, cfg.SocketPath, "clb.sock")
 	cfg.WorktreeDir = resolvePath(home, cfg.WorktreeDir, "worktrees")
+	// 0o077 includes group and other write. Write lets another user point
+	// webhook.url at their own server and collect the secret or header values.
+	if (cfg.Webhook.Secret != "" || len(cfg.Webhook.Headers) > 0) && info.Mode().Perm()&0o077 != 0 {
+		return Config{}, fmt.Errorf("%s: mode %#o lets other users read or change webhook.secret or webhook.headers; run chmod 600 %s", path, info.Mode().Perm(), path)
+	}
 	return cfg, nil
 }
 

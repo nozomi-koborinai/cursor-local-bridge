@@ -281,9 +281,91 @@ func testHome(t *testing.T) string {
 	return home
 }
 
+func TestLoadRefusesLooseWebhookFile(t *testing.T) {
+	const value = "v4lue-s3cret"
+	secretBody := `{"webhook":{"secret":"s3cret"}}`
+	headerBody := `{"webhook":{"headers":{"Authorization":"Bearer ` + value + `"}}}`
+
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o620, 0o604} {
+		t.Run(fmt.Sprintf("secret-%#o", mode), func(t *testing.T) {
+			home := testHome(t)
+			writeConfigMode(t, home, secretBody, mode)
+			_, err := Load(home)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			file := filepath.Join(home, "config.json")
+			if !strings.Contains(msg, file) || !strings.Contains(msg, "chmod 600") || !strings.Contains(msg, fmt.Sprintf("%#o", mode)) {
+				t.Fatalf("err = %v", err)
+			}
+			if strings.Contains(msg, "s3cret") {
+				t.Fatalf("err includes the secret: %v", err)
+			}
+		})
+	}
+
+	t.Run("headers-0640", func(t *testing.T) {
+		home := testHome(t)
+		writeConfigMode(t, home, headerBody, 0o640)
+		_, err := Load(home)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "chmod 600") || !strings.Contains(msg, "0640") {
+			t.Fatalf("err = %v", err)
+		}
+		if strings.Contains(msg, value) {
+			t.Fatalf("err includes the header value: %v", err)
+		}
+	})
+
+	t.Run("headers-0600", func(t *testing.T) {
+		home := testHome(t)
+		writeConfigMode(t, home, headerBody, 0o600)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{"Authorization": "Bearer " + value}
+		if !reflect.DeepEqual(got.Webhook.Headers, want) {
+			t.Fatalf("headers = %#v", got.Webhook.Headers)
+		}
+	})
+
+	t.Run("plain-0644", func(t *testing.T) {
+		home := testHome(t)
+		writeConfigMode(t, home, `{"model":"m"}`, 0o644)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Model != "m" {
+			t.Fatalf("model = %q", got.Model)
+		}
+	})
+}
+
 func writeConfig(t *testing.T, home, body string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(body), 0o600); err != nil {
+	writeConfigMode(t, home, body, 0o600)
+}
+
+func writeConfigMode(t *testing.T, home, body string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(home, "config.json")
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != mode {
+		t.Fatalf("mode = %#o, want %#o", info.Mode().Perm(), mode)
 	}
 }
