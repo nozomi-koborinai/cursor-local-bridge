@@ -1,0 +1,39 @@
+version: 2
+
+project_name: clb
+
+builds:
+  - main: ./cmd/clb
+    binary: clb
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - packaging/launchd/*.plist
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+homebrew_casks:
+  - name: clb
+    binaries: [clb]
+    homepage: https://github.com/nozomi-koborinai/cursor-local-bridge
+    description: Run local Cursor CLI agents with a cloud-agent-shaped lifecycle
+    license: MIT
+    repository:
+      owner: nozomi-koborinai
+      name: homebrew-tap
+    skip_upload: true
