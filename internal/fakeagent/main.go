@@ -45,7 +45,7 @@ func run(argv []string) error {
 	case len(args) == 1 && args[0] == "create-chat":
 		return createChat()
 	}
-	return errors.New("usage: fakeagent [--model M] acp | create-chat | -p --output-format stream-json [--resume ID] [--workspace DIR] [--] PROMPT")
+	return errors.New("usage: fakeagent [--model M] acp | create-chat | -p --output-format stream-json [--model M] [--resume ID] [--workspace DIR] [--] PROMPT")
 }
 
 func loggedOut() bool { return os.Getenv("FAKEAGENT_LOGGED_OUT") == "1" }
