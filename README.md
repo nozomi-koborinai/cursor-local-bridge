@@ -77,7 +77,7 @@ Use it in environments where cloud agents are not available.
    clb stop run-3f9a2c7d1e0b
    ```
 
-   `clb stop` removes the worktree. The branch `clb/run-3f9a2c7d1e0b` stays, so commits the agent made are kept. Uncommitted changes in the worktree are lost.
+   `clb stop` commits any uncommitted changes to the branch `clb/run-3f9a2c7d1e0b`, then removes the worktree. The branch stays, so the agent's work is kept.
 
 ## Example: Grok Bot
 
@@ -133,7 +133,7 @@ A run is in exactly one of these states.
 | `awaiting_permission` | The agent sent a permission request for a tool call and waits until you approve or deny it. |
 | `finished` | The agent ended its turn and no prompts are queued. The daemon closes the agent process, and a follow-up starts a new one. |
 | `failed` | The agent process failed. `error` says why. The worktree stays until you run `clb stop`. |
-| `stopped` | You stopped the run. Its worktree is removed. |
+| `stopped` | You stopped the run. Its worktree is removed, and its changes are on the run's branch. |
 
 The commands change the state as follows.
 
@@ -143,9 +143,11 @@ The commands change the state as follows.
 | `followup` | `queued`, `running`, `awaiting_permission` | Queues the prompt. The agent gets it when its current turn ends. |
 | `followup` | `finished` | Starts the agent again on the same session and sends the prompt. The run goes back to `queued`. |
 | `approve`, `deny` | `awaiting_permission` | Answers the oldest pending permission request. |
-| `stop` | any | Stops the agent, removes the worktree, and moves the run to `stopped`. A `failed` run stays `failed`. Stopping again only retries the worktree cleanup. |
+| `stop` | any | Stops the agent, commits uncommitted changes to the run's branch, removes the worktree, and moves the run to `stopped`. If the commit or the removal fails, the worktree stays and the run moves to `failed`. A `failed` run stays `failed`. Stopping again only retries the worktree cleanup. |
 
 A command in a state that does not allow it fails with a `conflict` error and changes nothing. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
+
+The commit that `clb stop` makes includes untracked files but not ignored ones. It skips the repository's commit hooks and commit signing, because the daemon has no terminal to answer them. If your git config has no `user.name` or `user.email`, the commit's author is `clb <clb@localhost>`. When the commit or the removal fails, `error` is `remove worktree: ` followed by git's message, and `clb stop` prints that message with the `internal` code.
 
 When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. It finds them in two ways:
 
@@ -154,7 +156,7 @@ When the daemon closes an agent process, it also ends the processes that the age
 
 The second way also ends a process of yours that is not the agent's, such as a shell that you opened in the worktree. `clb` sends SIGTERM, then SIGKILL to any that still run 1 second later. It never matches a working directory outside the run's worktree.
 
-If the daemon stops while runs are active, it marks those runs `failed` when it starts again.
+If the daemon stops while runs are active, it marks those runs `failed` when it starts again. First it ends the processes whose working directory is inside those runs' worktrees, such as a command that the agent left running.
 
 ## Commands
 
@@ -163,12 +165,12 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 | Command | Prints |
 | --- | --- |
 | `clb daemon` | Runs the daemon in the foreground. |
-| `clb launch [--repo DIR] [--ref REF] [--model MODEL] [--backend acp\|print] PROMPT` | The new run. `--repo` defaults to the current directory and `--ref` to `HEAD`. |
+| `clb launch [--repo DIR] [--ref REF] [--model MODEL] [--backend acp\|print] PROMPT` | The new run. `--repo` defaults to the current directory and `--ref` to `HEAD`. `--ref` must name a commit and cannot start with `-`. |
 | `clb status ID` | The run. |
 | `clb list` | An array of all runs, newest first. |
 | `clb followup ID PROMPT` | The run. |
 | `clb approve ID`, `clb deny ID` | The run. |
-| `clb stop ID` | The run, after its worktree is removed. |
+| `clb stop ID` | The run, after its worktree is removed. If the removal fails, the error, with exit code 1. |
 | `clb logs [--follow] ID` | The run's events, one JSON object per line. `--follow` waits for new events until the run is no longer active. |
 
 A `PROMPT` of `-` reads the prompt from stdin. Every command accepts `--home DIR`. See [Configuration](#configuration).
@@ -361,7 +363,6 @@ Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered thes
 Other gaps:
 
 - A command that the agent starts outside the worktree with an empty environment keeps running after the run ends.
-
 - The Cursor CLI creates a folder in `~/.cursor/projects` for each run's worktree, named after the worktree path, such as `~/.cursor/projects/<path>-worktrees-run-3f9a2c7d1e0b`. `clb` does not remove these folders.
 - When `agent -p --resume` gets a chat ID that the CLI does not know, it starts a new chat and reports no error. A follow-up on a `print` run then reaches an agent without the earlier conversation, and `clb` cannot tell.
 - A webhook that is still being delivered when the daemon stops is not retried after a restart.
