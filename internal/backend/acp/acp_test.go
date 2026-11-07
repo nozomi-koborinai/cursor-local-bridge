@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	acpsdk "github.com/coder/acp-go-sdk"
+
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/fakeagent/fakeagenttest"
 )
@@ -196,6 +198,47 @@ func TestPermissionAnswerReachesAgent(t *testing.T) {
 			var toolCall struct{ ToolCallID string }
 			if err := json.Unmarshal(asked[0].ToolCall, &toolCall); err != nil || toolCall.ToolCallID != "perm-1" {
 				t.Errorf("ToolCall = %s, want the agent's tool call", asked[0].ToolCall)
+			}
+		})
+	}
+}
+
+func TestPermissionAnswerNeverSelectsAStandingRule(t *testing.T) {
+	allowOnce := acpsdk.PermissionOption{OptionId: "allow-once", Kind: acpsdk.PermissionOptionKindAllowOnce}
+	allowAlways := acpsdk.PermissionOption{OptionId: "allow-always", Kind: acpsdk.PermissionOptionKindAllowAlways}
+	rejectOnce := acpsdk.PermissionOption{OptionId: "reject-once", Kind: acpsdk.PermissionOptionKindRejectOnce}
+	rejectAlways := acpsdk.PermissionOption{OptionId: "reject-always", Kind: acpsdk.PermissionOptionKindRejectAlways}
+	tests := []struct {
+		name     string
+		approve  bool
+		options  []acpsdk.PermissionOption
+		selected string
+	}{
+		{"approve picks allow once", true, []acpsdk.PermissionOption{allowAlways, allowOnce, rejectOnce}, "allow-once"},
+		{"deny picks reject once", false, []acpsdk.PermissionOption{rejectAlways, rejectOnce, allowOnce}, "reject-once"},
+		{"approve without allow once is cancelled", true, []acpsdk.PermissionOption{allowAlways, rejectOnce}, ""},
+		{"deny without reject once is cancelled", false, []acpsdk.PermissionOption{allowOnce, rejectAlways}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &recorder{answer: func() (bool, error) { return tt.approve, nil }}
+			s := New(fakeAgent, sink)
+			t.Cleanup(func() { _ = s.Close() })
+
+			resp, err := client{s}.RequestPermission(context.Background(), acpsdk.RequestPermissionRequest{Options: tt.options})
+			if err != nil {
+				t.Fatalf("RequestPermission: %v", err)
+			}
+
+			var got string
+			if sel := resp.Outcome.Selected; sel != nil {
+				got = string(sel.OptionId)
+			}
+			if got != tt.selected {
+				t.Errorf("selected %q, want %q", got, tt.selected)
+			}
+			if tt.selected == "" && resp.Outcome.Cancelled == nil {
+				t.Errorf("outcome = %+v, want cancelled", resp.Outcome)
 			}
 		})
 	}

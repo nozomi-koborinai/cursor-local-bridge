@@ -39,9 +39,11 @@ var (
 	errAuthTimeout = errors.New("authenticate timed out")
 )
 
-var permissionKinds = map[bool][]acpsdk.PermissionOptionKind{
-	true:  {acpsdk.PermissionOptionKindAllowOnce, acpsdk.PermissionOptionKindAllowAlways},
-	false: {acpsdk.PermissionOptionKindRejectOnce, acpsdk.PermissionOptionKindRejectAlways},
+// answerKind never names an "always" option: an answer covers one request,
+// and a standing rule would let the agent skip later approvals.
+var answerKind = map[bool]acpsdk.PermissionOptionKind{
+	true:  acpsdk.PermissionOptionKindAllowOnce,
+	false: acpsdk.PermissionOptionKindRejectOnce,
 }
 
 // Session is one "agent acp" process bound to one ACP session.
@@ -338,13 +340,11 @@ func (c client) RequestPermission(ctx context.Context, req acpsdk.RequestPermiss
 	if err != nil {
 		return cancelled, nil
 	}
-	for _, kind := range permissionKinds[approve] {
-		for _, o := range req.Options {
-			if o.Kind == kind {
-				return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
-					Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: o.OptionId},
-				}}, nil
-			}
+	for _, o := range req.Options {
+		if o.Kind == answerKind[approve] {
+			return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
+				Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: o.OptionId},
+			}}, nil
 		}
 	}
 	return cancelled, nil
