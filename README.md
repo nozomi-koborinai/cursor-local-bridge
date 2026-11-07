@@ -183,14 +183,22 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
   "queuedPrompts": 1,
   "pendingPermission": {
     "id": "perm-1",
-    "title": "Run npm test",
+    "title": "`npm test`",
     "toolCall": {
       "toolCallId": "call_1",
-      "title": "Run npm test",
+      "title": "`npm test`",
       "kind": "execute",
       "status": "pending",
-      "rawInput": { "command": "npm test" }
-    }
+      "rawInput": { "command": "npm test" },
+      "content": [
+        { "type": "content", "content": { "type": "text", "text": "Not in allowlist: npm" } }
+      ]
+    },
+    "options": [
+      { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+      { "optionId": "allow-always", "name": "Always allow", "kind": "allow_always" },
+      { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+    ]
   },
   "createdAt": "2026-11-07T09:30:00.123456789Z",
   "updatedAt": "2026-11-07T09:30:04.987654321Z"
@@ -198,9 +206,10 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 ```
 
 - Empty fields such as `summary`, `error`, and `model` are left out.
-- `summary` is the agent's reply text from its most recent turn.
+- `summary` is the agent's reply text from its most recent turn. When tool calls split the reply into several blocks of text, `summary` joins the blocks with a newline.
 - `queuedPrompts` counts prompts that the agent has not received yet.
-- `pendingPermission` is the oldest unanswered permission request. `toolCall` is the agent's description of the tool call, as sent by the Cursor CLI.
+- `pendingPermission` is the oldest unanswered permission request. `toolCall` is the agent's description of the tool call, as sent by the Cursor CLI. For a shell command the Cursor CLI puts the command in `title` and the reason it asks, such as `Not in allowlist: npm`, in `content`.
+- `options` lists the choices the agent offered, as it sent them. `clb approve` picks the option whose `kind` is `allow_once`, and `clb deny` the one whose `kind` is `reject_once`. The `permission_requested` event carries the same `options`.
 
 ### Events
 
@@ -213,7 +222,7 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 
 - `status`, `prompt`, `permission_requested`, `permission_answered`, and `webhook` events come from the daemon.
 - Other types come from the agent unchanged. With the `acp` backend they are ACP `sessionUpdate` values such as `agent_message_chunk`, `tool_call`, and `plan`, plus `turn_ended`. With the `print` backend they are stream-json `type` values.
-- By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
+- By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events, or the `thinking` events of the `print` backend. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
 - The Cursor CLI sends the first `tool_call` event for a shell command with `rawInput` set to `{}` and puts the command in a later `tool_call_update` event with the same `toolCallId`. A `tool_call_update` carries only the fields that changed. To get a tool's input, read the latest `rawInput` among the events for its `toolCallId`.
 
 The same lines are in `~/.clb/logs/<run id>.ndjson`. SQLite is the source of truth. The daemon rewrites the NDJSON files from SQLite when it starts.
@@ -269,6 +278,7 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
   "socketPath": "",
   "worktreeDir": "",
   "storeAllEvents": false,
+  "trustWorktree": false,
   "webhook": {
     "url": "https://example.com/hooks/clb",
     "secret": "a long random string"
@@ -283,7 +293,8 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
 | `model` | empty | Passed to the CLI as `--model`. Empty lets the CLI choose. `clb launch --model` overrides it. |
 | `socketPath` | `<home>/clb.sock` | The daemon socket. It must be shorter than 104 bytes. |
 | `worktreeDir` | `<home>/worktrees` | Where run worktrees go. |
-| `storeAllEvents` | `false` | Store `agent_thought_chunk` and `available_commands_update` events too. |
+| `storeAllEvents` | `false` | Store `agent_thought_chunk`, `available_commands_update`, and `thinking` events too. |
+| `trustWorktree` | `false` | Pass `--trust` to `agent -p`. The `print` backend needs it. See [Backends](#backends). |
 | `webhook.url` | empty | Where to post run status changes. |
 | `webhook.secret` | empty | The HMAC key. Required when `webhook.url` is set. |
 
@@ -292,7 +303,9 @@ Relative paths resolve against the home directory. Unknown fields are an error. 
 ## Backends
 
 - `acp`, the default, runs `agent acp` and talks to it over the Agent Client Protocol on stdio. One agent process serves a run until the run finishes. The permission requests the CLI sends reach you through `awaiting_permission`.
-- `print` runs `agent -p --output-format stream-json --resume <chat id>` once per prompt. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
+- `print` runs `agent -p --trust --output-format stream-json --resume <chat id>` once per prompt. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
+
+`agent -p` refuses to run in a workspace that you have not trusted, and every run gets a new worktree. To use the `print` backend, set `trustWorktree` to `true` in the config file, and `clb` passes `--trust`. `--trust` trusts the workspace without a prompt. Unlike `--force`, it does not allow commands. Without `trustWorktree`, `clb launch --backend print` and `clb followup` on a print run fail with an `invalid` error that says how to turn it on.
 
 ## Run the daemon with launchd
 
@@ -323,7 +336,7 @@ The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the
 ## Security
 
 - The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists.
-- `clb` forwards each permission request that the Cursor CLI sends and answers it only when you run `clb approve` or `clb deny`. It never passes `--force` or `--yolo` to the CLI.
+- `clb` forwards each permission request that the Cursor CLI sends and answers it only when you run `clb approve` or `clb deny`. It never passes `--force` or `--yolo` to the CLI. It passes `--trust` to `agent -p` only when `trustWorktree` is `true`.
 - Whether the CLI sends a request before it uses a tool depends on the CLI's own settings, not on `clb`. In testing with a logged-in CLI, the agent applied a file edit without sending a request. To block a tool or a path outright, add it to `permissions.deny` in `~/.cursor/cli-config.json` or the project's `.cursor/cli.json`. See [Permissions](https://cursor.com/docs/cli/reference/permissions) in the Cursor CLI docs.
 - `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
 - An agent runs with your user's rights in its worktree. Review the run's branch before you merge it.
