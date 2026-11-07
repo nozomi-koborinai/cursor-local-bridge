@@ -12,7 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"net/textproto"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -26,11 +30,81 @@ const (
 	// delivery, so receivers can drop duplicates.
 	DeliveryHeader = "X-Clb-Delivery"
 
-	userAgent = "clb-webhook/1"
+	userAgent       = "clb-webhook/1"
+	clbHeaderPrefix = "X-Clb-"
 )
 
 // EventStatusChange is the only event clb sends.
 const EventStatusChange = "statusChange"
+
+// reservedHeaders are canonical names CheckHeaders rejects.
+// Content-Type and User-Agent are written on every delivery.
+// Host, Content-Length, and Transfer-Encoding are dropped or rewritten
+// by net/http, so a configured value would never be sent.
+var reservedHeaders = map[string]string{
+	"Content-Type":      "is set by clb and cannot be overridden",
+	"User-Agent":        "is set by clb and cannot be overridden",
+	"Host":              "is dropped or rewritten by the HTTP client and cannot be set",
+	"Content-Length":    "is dropped or rewritten by the HTTP client and cannot be set",
+	"Transfer-Encoding": "is dropped or rewritten by the HTTP client and cannot be set",
+}
+
+// CheckHeaders rejects headers that clb will not send. A nil map is valid.
+// The error names the header and omits the value.
+func CheckHeaders(headers map[string]string) error {
+	seen := make(map[string]string, len(headers))
+	for _, name := range slices.Sorted(maps.Keys(headers)) {
+		if !validHeaderToken(name) {
+			return fmt.Errorf("header name %q is not a valid HTTP token", name)
+		}
+		canon := textproto.CanonicalMIMEHeaderKey(name)
+		if reason, ok := reservedHeaders[canon]; ok {
+			return fmt.Errorf("header %q %s", name, reason)
+		}
+		if strings.HasPrefix(canon, clbHeaderPrefix) {
+			return fmt.Errorf("header %q is in clb's namespace and cannot be set", name)
+		}
+		if headerValueHasControl(headers[name]) {
+			return fmt.Errorf("header %q value has a control character such as CR or LF", name)
+		}
+		if prev, ok := seen[canon]; ok {
+			return fmt.Errorf("headers %q and %q name the same header", prev, name)
+		}
+		seen[canon] = name
+	}
+	return nil
+}
+
+func validHeaderToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !isTChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isTChar(b byte) bool {
+	switch {
+	case b >= '0' && b <= '9', b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z':
+		return true
+	default:
+		return strings.IndexByte("!#$%&'*+-.^_`|~", b) >= 0
+	}
+}
+
+func headerValueHasControl(v string) bool {
+	for i := 0; i < len(v); i++ {
+		b := v[i]
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return true
+		}
+	}
+	return false
+}
 
 // Payload is the JSON body of a webhook request.
 type Payload struct {
@@ -60,6 +134,9 @@ func Verify(secret, body []byte, signature string) bool {
 type Sender struct {
 	URL    string
 	Secret []byte
+	// Header holds extra headers sent on every delivery. The names are
+	// already canonical.
+	Header http.Header
 	Client *http.Client
 	// Backoff is the wait before the first retry. It doubles per retry.
 	Backoff time.Duration
@@ -102,7 +179,7 @@ func (s *Sender) Send(ctx context.Context, p Payload) error {
 				backoff *= 2
 			}
 		}
-		err := post(ctx, client, s.URL, body, sig, p.Event, delivery)
+		err := post(ctx, client, s.URL, body, sig, p.Event, delivery, s.Header)
 		if err == nil {
 			return nil
 		}
@@ -131,11 +208,12 @@ func wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string) error {
+func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string, extra http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("webhook POST: %w", err)
 	}
+	maps.Copy(req.Header, extra)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set(SignatureHeader, sig)

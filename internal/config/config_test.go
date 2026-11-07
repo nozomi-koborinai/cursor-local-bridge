@@ -80,6 +80,59 @@ func TestLoadFullFile(t *testing.T) {
 	}
 }
 
+func TestLoadWebhookHeaders(t *testing.T) {
+	home := testHome(t)
+	writeConfig(t, home, `{
+		"webhook": {
+			"url": "https://example.com/hook",
+			"secret": "s3cret",
+			"headers": {"Authorization": "Bearer k", "X-Automation-Key": "k"}
+		}
+	}`)
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"Authorization": "Bearer k", "X-Automation-Key": "k"}
+	if !reflect.DeepEqual(got.Webhook.Headers, want) {
+		t.Fatalf("headers = %#v", got.Webhook.Headers)
+	}
+	if got.Webhook.URL != "https://example.com/hook" || got.Webhook.Secret != "s3cret" {
+		t.Fatalf("webhook = %+v", got.Webhook)
+	}
+
+	home = testHome(t)
+	writeConfig(t, home, `{"webhook":{"headers":{"Authorization":"Bearer only"}}}`)
+	got, err = Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Webhook.URL != "" || got.Webhook.Secret != "" {
+		t.Fatalf("webhook = %+v", got.Webhook)
+	}
+	if !reflect.DeepEqual(got.Webhook.Headers, map[string]string{"Authorization": "Bearer only"}) {
+		t.Fatalf("headers = %#v", got.Webhook.Headers)
+	}
+}
+
+func TestLoadRejectsWebhookHeaders(t *testing.T) {
+	home := testHome(t)
+	const value = "v4lue-s3cret"
+	writeConfig(t, home, `{"webhook":{"headers":{"Bad Name":"`+value+`"}}}`)
+	_, err := Load(home)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	file := filepath.Join(home, "config.json")
+	if !strings.Contains(msg, file) || !strings.Contains(msg, "webhook.headers") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(msg, value) {
+		t.Fatalf("err includes the header value: %v", err)
+	}
+}
+
 func TestLoadTrustWorktree(t *testing.T) {
 	home := testHome(t)
 	writeConfig(t, home, `{"trustWorktree": false}`)

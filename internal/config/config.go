@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 )
 
 // HomeEnv overrides the default home directory, ~/.clb.
@@ -49,6 +50,8 @@ type Config struct {
 type Webhook struct {
 	URL    string `json:"url"`
 	Secret string `json:"secret"`
+	// Headers are extra request headers sent on every delivery.
+	Headers map[string]string `json:"headers"`
 }
 
 // DefaultHome returns $CLB_HOME, or ~/.clb when it is unset.
@@ -151,6 +154,9 @@ func validate(path string, cfg Config) error {
 }
 
 func validateWebhook(path string, hook Webhook) error {
+	if err := webhook.CheckHeaders(hook.Headers); err != nil {
+		return fmt.Errorf("%s: webhook.headers: %w", path, err)
+	}
 	if hook.URL == "" {
 		return nil
 	}

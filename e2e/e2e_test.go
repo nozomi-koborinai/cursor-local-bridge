@@ -45,7 +45,13 @@ func TestCLB(t *testing.T) {
 	hooks := newReceiver(t)
 	writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
 		"agentPath": agentPath,
-		"webhook":   map[string]string{"url": hooks.url, "secret": secret},
+		"webhook": map[string]any{
+			"url":    hooks.url,
+			"secret": secret,
+			"headers": map[string]string{
+				"Authorization": "Bearer e2e-sender-key",
+			},
+		},
 	})
 	state := t.TempDir()
 	repo := gitRepo(t)
@@ -100,6 +106,9 @@ func TestCLB(t *testing.T) {
 	step("a signed webhook reports the finish", func(t *testing.T) {
 		d := hooks.wait(t, hello.ID, "finished", 1)[0]
 		checkSigned(t, d)
+		if got := d.header.Get("Authorization"); got != "Bearer e2e-sender-key" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer e2e-sender-key")
+		}
 		if got := d.header.Get("X-Clb-Event"); got != "statusChange" {
 			t.Errorf("X-Clb-Event = %q, want statusChange", got)
 		}
