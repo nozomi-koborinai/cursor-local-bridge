@@ -55,7 +55,6 @@ func removeStale(path string) error {
 	return nil
 }
 
-// peerListener closes connections from other users before Accept returns.
 type peerListener struct {
 	ln  *net.UnixListener
 	uid int

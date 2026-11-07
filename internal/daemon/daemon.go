@@ -33,10 +33,8 @@ type Session interface {
 	Close() error
 }
 
-// Backends maps each backend kind to a constructor for its sessions.
 type Backends map[backend.Kind]func(backend.Sink) Session
 
-// Options configures a Daemon.
 type Options struct {
 	Store    *store.Store
 	Backends Backends
@@ -46,7 +44,6 @@ type Options struct {
 	Logger  *slog.Logger
 }
 
-// Daemon supervises runs and answers ipc calls about them.
 type Daemon struct {
 	store    *store.Store
 	backends Backends
@@ -54,13 +51,8 @@ type Daemon struct {
 	webhook  *webhook.Sender
 	log      *slog.Logger
 
-	// ctx ends when Serve returns. Run goroutines, agent sessions, and
-	// webhook deliveries live inside it.
 	ctx    context.Context
 	cancel context.CancelFunc
-	// writes carries the run goroutines' store calls. The end of ctx does
-	// not cancel it, so a transition in progress writes both the run's row
-	// and its events.
 	writes context.Context
 	wg     sync.WaitGroup
 
@@ -68,7 +60,6 @@ type Daemon struct {
 	actors map[store.RunID]*actor
 }
 
-// New returns a daemon. Call Recover, then Serve.
 func New(opts Options) *Daemon {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{
@@ -136,7 +127,6 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 	return nil
 }
 
-// runCall performs a call that is answered with one run.
 func (d *Daemon) runCall(ctx context.Context, req ipc.Request) (store.Run, error) {
 	id := store.RunID(req.RunID)
 	switch req.Method {
@@ -201,7 +191,6 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	return a.call(ctx, func() error { return a.create(run, effects) })
 }
 
-// command applies e to an existing run on the run's goroutine.
 func (d *Daemon) command(ctx context.Context, id store.RunID, e lifecycle.Event) (store.Run, error) {
 	if _, err := d.store.GetRun(ctx, id); err != nil {
 		return store.Run{}, err
@@ -227,8 +216,6 @@ func (d *Daemon) list(ctx context.Context, send func(ipc.Response) error) error 
 
 const logPollInterval = 200 * time.Millisecond
 
-// logs sends the run's stored events. With follow it keeps polling for new
-// events and returns once the run is no longer active and none remain.
 func (d *Daemon) logs(ctx context.Context, id store.RunID, follow bool, send func(ipc.Response) error) error {
 	var after int64
 	for {
@@ -263,7 +250,6 @@ func (d *Daemon) logs(ctx context.Context, id store.RunID, follow bool, send fun
 	}
 }
 
-// actor returns the goroutine that owns run id, starting it on first use.
 func (d *Daemon) actor(id store.RunID) *actor {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -276,8 +262,6 @@ func (d *Daemon) actor(id store.RunID) *actor {
 	return a
 }
 
-// rewriteLog rewrites the run's NDJSON log on the run's goroutine, or under
-// d.mu when the run has none, so that no append races the rewrite.
 func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 	d.mu.Lock()
 	a, ok := d.actors[id]

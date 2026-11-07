@@ -37,7 +37,6 @@ type Session struct {
 	running *proc.Process
 }
 
-// New returns a session that runs agentPath and reports to sink.
 func New(agentPath string, sink backend.Sink) *Session {
 	return &Session{agentPath: agentPath, sink: sink}
 }
@@ -155,7 +154,6 @@ func (s *Session) Close() error {
 	return nil
 }
 
-// run starts cmd as the process in flight, which Close stops.
 func (s *Session) run(cmd *exec.Cmd) (*proc.Process, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -189,8 +187,6 @@ type result struct {
 	Result  string `json:"result"`
 }
 
-// forward sends each line of stdout to the sink and returns the last result
-// line.
 func (s *Session) forward(stdout io.Reader) (*result, error) {
 	var last *result
 	r := bufio.NewReader(stdout)
@@ -211,9 +207,6 @@ func (s *Session) forward(stdout io.Reader) (*result, error) {
 	}
 }
 
-// parseLine turns one line of stream-json output into an event. A line that
-// is not a JSON object with a type becomes a "stdout" event carrying the line
-// as a JSON string.
 func parseLine(line []byte) (backend.Event, *result, bool) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {

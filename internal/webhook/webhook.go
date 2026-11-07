@@ -57,7 +57,6 @@ func Verify(secret, body []byte, signature string) bool {
 	return hmac.Equal([]byte(signature), []byte(Sign(secret, body)))
 }
 
-// Sender posts payloads to one URL.
 type Sender struct {
 	URL    string
 	Secret []byte

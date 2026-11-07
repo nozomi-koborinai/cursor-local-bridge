@@ -218,7 +218,6 @@ func listen(t *testing.T) net.Listener {
 	return ln
 }
 
-// serve runs Serve on ln until the test ends and returns the socket path.
 func serve(t *testing.T, ln net.Listener, h Handler) string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

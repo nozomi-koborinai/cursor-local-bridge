@@ -69,7 +69,6 @@ func TestCLB(t *testing.T) {
 	})
 
 	step("logs show the streamed events", func(t *testing.T) {
-		// The webhook outcome is the run's last event, so the log is complete.
 		eventually(t, "the webhook outcome in the logs", func() bool {
 			return slices.ContainsFunc(c.logs(t, hello.ID), isType("webhook"))
 		})
@@ -206,7 +205,6 @@ func TestCLB(t *testing.T) {
 	})
 }
 
-// clb runs the clb binary against one home directory.
 type clb struct {
 	path string
 	home string
@@ -222,7 +220,6 @@ func (c *clb) command(args ...string) *exec.Cmd {
 	return cmd
 }
 
-// output runs clb with stdin and returns its stdout. It fails t if clb fails.
 func (c *clb) output(t *testing.T, stdin string, args ...string) []byte {
 	t.Helper()
 	cmd := c.command(args...)
@@ -236,7 +233,6 @@ func (c *clb) output(t *testing.T, stdin string, args ...string) []byte {
 	return out
 }
 
-// run runs a clb command that prints a run.
 func (c *clb) run(t *testing.T, args ...string) ipc.Run {
 	t.Helper()
 	return c.runStdin(t, "", args...)
@@ -254,8 +250,6 @@ func (c *clb) logs(t *testing.T, id string) []ipc.Event {
 	return parseEvents(t, c.output(t, "", "logs", id))
 }
 
-// waitStatus polls clb status until the run has status want. A failed run
-// ends the wait early.
 func (c *clb) waitStatus(t *testing.T, id, want string) ipc.Run {
 	t.Helper()
 	var r ipc.Run
@@ -269,13 +263,12 @@ func (c *clb) waitStatus(t *testing.T, id, want string) ipc.Run {
 	return r
 }
 
-// process is a clb process running in the background.
 type process struct {
 	cmd    *exec.Cmd
 	stdout syncBuffer
 	stderr syncBuffer
 	done   chan struct{}
-	err    error // set before done is closed
+	err    error
 }
 
 func (c *clb) start(t *testing.T, env []string, args ...string) *process {
@@ -303,7 +296,6 @@ func (p *process) exited() bool {
 	}
 }
 
-// wait fails t unless p exits with status 0 within the timeout.
 func (p *process) wait(t *testing.T) {
 	t.Helper()
 	select {
@@ -316,8 +308,6 @@ func (p *process) wait(t *testing.T) {
 	}
 }
 
-// stop ends p if it is still running. It sends SIGTERM, then SIGKILL if p
-// outlives the timeout.
 func (p *process) stop() {
 	if p.exited() {
 		return
@@ -366,7 +356,6 @@ type delivery struct {
 	payload payload
 }
 
-// receiver records every webhook POST.
 type receiver struct {
 	url string
 
@@ -394,7 +383,6 @@ func newReceiver(t *testing.T) *receiver {
 	return r
 }
 
-// wait returns the deliveries for run id with status once there are n.
 func (r *receiver) wait(t *testing.T, id, status string, n int) []delivery {
 	t.Helper()
 	var got []delivery
@@ -426,8 +414,6 @@ func (r *receiver) matching(id, status string) []delivery {
 	return out
 }
 
-// checkSigned recomputes the signature from the exact body without the
-// webhook package, so that the test pins the wire format.
 func checkSigned(t *testing.T, d delivery) {
 	t.Helper()
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -438,7 +424,6 @@ func checkSigned(t *testing.T, d delivery) {
 	}
 }
 
-// syncBuffer is a bytes.Buffer that a process writes while the test reads.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -468,8 +453,6 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// poll calls ok every 50ms until it returns true or the timeout passes, and
-// reports whether it returned true.
 func poll(ok func() bool) bool {
 	deadline := time.Now().Add(timeout)
 	for !ok() {

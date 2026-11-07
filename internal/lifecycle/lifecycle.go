@@ -25,7 +25,6 @@ var states = map[State]bool{
 	Finished: true, Failed: true, Stopped: true,
 }
 
-// ParseState converts stored or wire text into a State.
 func ParseState(s string) (State, error) {
 	if !states[State(s)] {
 		return "", fmt.Errorf("unknown run state %q", s)
@@ -57,7 +56,6 @@ type Run struct {
 	Error       string
 }
 
-// Event is an input to Apply.
 type Event interface{ event() }
 
 // Started reports that the agent process is ready for a prompt.
@@ -89,13 +87,11 @@ func (FollowUp) event()            {}
 func (Stop) event()                {}
 func (BackendFailed) event()       {}
 
-// Effect is an action the caller performs after a transition.
 type Effect interface{ effect() }
 
 // StartBackend starts an agent process. Resume continues the stored session.
 type StartBackend struct{ Resume bool }
 
-// SendPrompt sends one prompt to the running agent.
 type SendPrompt struct{ Prompt string }
 
 // AnswerPermission unblocks the agent's permission request with ID.
@@ -107,7 +103,6 @@ type AnswerPermission struct {
 // CloseBackend cancels any turn in flight and terminates the agent process.
 type CloseBackend struct{}
 
-// RemoveWorktree deletes the run's git worktree.
 type RemoveWorktree struct{}
 
 // Notify delivers the completion webhook for a run that entered State.
@@ -123,7 +118,6 @@ func (Notify) effect()           {}
 // ErrNotAllowed reports a command that the run's current state rejects.
 var ErrNotAllowed = errors.New("not allowed")
 
-// Launch returns a new queued run for prompt.
 func Launch(prompt string) (Run, []Effect) {
 	return Run{State: Queued, Prompts: []string{prompt}}, []Effect{StartBackend{}}
 }
@@ -212,7 +206,6 @@ func notAllowed(action string, s State) error {
 	return fmt.Errorf("%w: cannot %s a %s run", ErrNotAllowed, action, s)
 }
 
-// clone copies s so a returned Run never shares a backing array with its input.
 func clone[T any](s []T) []T {
 	if len(s) == 0 {
 		return nil

@@ -26,7 +26,6 @@ var migrationFS embed.FS
 // RunID identifies a run. It is also the suffix of the run's branch name.
 type RunID string
 
-// Run is one stored run.
 type Run struct {
 	ID        RunID
 	Repo      string
@@ -52,10 +51,8 @@ type Event struct {
 	Data  json.RawMessage
 }
 
-// ErrNotFound reports a run ID with no stored run.
 var ErrNotFound = errors.New("run not found")
 
-// Store is a SQLite database opened by Open.
 type Store struct {
 	db *sql.DB
 }
@@ -233,8 +230,6 @@ func (s *Store) Events(ctx context.Context, id RunID, afterSeq int64) ([]Event, 
 	return out, nil
 }
 
-// user_version counts applied migration files in lexical order. It is not the
-// numeric prefix in the filename, so a renamed prefix cannot skip a file.
 func migrate(db *sql.DB) error {
 	entries, err := fs.ReadDir(migrationFS, "migrations")
 	if err != nil {

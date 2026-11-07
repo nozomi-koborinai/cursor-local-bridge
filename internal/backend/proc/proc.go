@@ -18,7 +18,6 @@ const (
 	stopGrace = 3 * time.Second
 )
 
-// Process is a started command.
 type Process struct {
 	// Stdout is the read end of the command's stdout. The caller reads and
 	// closes it. Unlike exec.Cmd.StdoutPipe, it stays readable after the
@@ -59,11 +58,8 @@ func Start(cmd *exec.Cmd) (*Process, error) {
 	return p, nil
 }
 
-// Done is closed when the process has exited.
 func (p *Process) Done() <-chan struct{} { return p.done }
 
-// Wait blocks until the process exits and returns its exit error, nil for
-// exit status 0.
 func (p *Process) Wait() error {
 	<-p.done
 	return p.err

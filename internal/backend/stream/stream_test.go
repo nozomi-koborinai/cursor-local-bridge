@@ -92,7 +92,6 @@ func (r *recorder) waitText(t *testing.T, substr string) {
 	}
 }
 
-// useState points the fake agent at a fresh state directory and returns it.
 func useState(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("FAKEAGENT_STATE_DIR", dir)

@@ -76,7 +76,6 @@ func TestSendPostsSignedPayload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	// Attempts < 1 is one try. A nil Client uses the default 10s timeout.
 	s := Sender{URL: srv.URL, Secret: secret, Backoff: time.Millisecond}
 	if err := s.Send(t.Context(), payload); err != nil {
 		t.Fatal(err)
