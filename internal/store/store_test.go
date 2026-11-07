@@ -36,6 +36,7 @@ func TestRunRoundTrip(t *testing.T) {
 				ID:       "perm-1",
 				Title:    "Run ls",
 				ToolCall: tool,
+				Options:  json.RawMessage(`[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]`),
 			}},
 			Error: "partial",
 		},

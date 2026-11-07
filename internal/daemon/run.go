@@ -326,7 +326,7 @@ func (s *turnSummary) Reset() {
 }
 
 func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
-	p := lifecycle.Permission{ID: a.nextPermissionID(), Title: req.Title, ToolCall: req.ToolCall}
+	p := lifecycle.Permission{ID: a.nextPermissionID(), Title: req.Title, ToolCall: req.ToolCall, Options: req.Options}
 	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
 	if err != nil || run.Lifecycle.State != lifecycle.AwaitingPermission {
 		answer <- false

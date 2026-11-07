@@ -82,6 +82,7 @@ type Permission struct {
 	ID       string          `json:"id"`
 	Title    string          `json:"title"`
 	ToolCall json.RawMessage `json:"toolCall,omitempty"`
+	Options  json.RawMessage `json:"options,omitempty"`
 }
 
 // Event is one entry of a run's event log. The daemon writes the same JSON,

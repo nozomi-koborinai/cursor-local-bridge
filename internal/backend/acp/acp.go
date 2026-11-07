@@ -332,9 +332,16 @@ func (c client) RequestPermission(ctx context.Context, req acpsdk.RequestPermiss
 	if req.ToolCall.Title != nil {
 		title = *req.ToolCall.Title
 	}
+	var options json.RawMessage
+	if len(req.Options) > 0 {
+		options, err = json.Marshal(req.Options)
+		if err != nil {
+			return cancelled, nil
+		}
+	}
 	ctx, cancel := c.s.bind(ctx)
 	defer cancel()
-	approve, err := c.s.sink.Permission(ctx, backend.PermissionRequest{Title: title, ToolCall: toolCall})
+	approve, err := c.s.sink.Permission(ctx, backend.PermissionRequest{Title: title, ToolCall: toolCall, Options: options})
 	if err != nil {
 		return cancelled, nil
 	}

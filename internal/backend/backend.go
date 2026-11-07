@@ -50,6 +50,9 @@ type Event struct {
 type PermissionRequest struct {
 	Title    string
 	ToolCall json.RawMessage
+	// Options is the agent's permission choices as a JSON array of optionId,
+	// name, and kind.
+	Options json.RawMessage
 }
 
 // Sink receives what a session produces. Implementations are safe for

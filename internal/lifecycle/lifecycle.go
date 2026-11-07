@@ -42,6 +42,7 @@ type Permission struct {
 	ID       string          `json:"id"`
 	Title    string          `json:"title"`
 	ToolCall json.RawMessage `json:"toolCall,omitempty"`
+	Options  json.RawMessage `json:"options,omitempty"`
 }
 
 // Run is the lifecycle part of a run record.

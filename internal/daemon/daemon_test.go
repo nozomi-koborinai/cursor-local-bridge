@@ -251,6 +251,48 @@ func TestFollowUpAfterFinishResumesTheSession(t *testing.T) {
 	}
 }
 
+func TestPermissionOptionsRoundTrip(t *testing.T) {
+	options := json.RawMessage(`[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]`)
+	tool := json.RawMessage(`{"kind":"execute","title":"` + "`echo`" + `","content":"Not in allowlist: echo"}`)
+	h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, _ string) error {
+		approved, err := s.sink.Permission(ctx, backend.PermissionRequest{
+			Title:    "`echo`",
+			ToolCall: tool,
+			Options:  options,
+		})
+		if err != nil {
+			return err
+		}
+		answer := "denied"
+		if approved {
+			answer = "approved"
+		}
+		s.sink.Event(chunk("permission: " + answer))
+		return nil
+	}})
+
+	run := h.launch("[permission]")
+	waiting := h.waitStatus(run.ID, "awaiting_permission")
+	p := waiting.PendingPermission
+	if p == nil || p.Title != "`echo`" || string(p.ToolCall) != string(tool) || string(p.Options) != string(options) {
+		t.Fatalf("pending permission = %+v, want title %q, tool %s, options %s", p, "`echo`", tool, options)
+	}
+	events := h.logs(run.ID)
+	var body struct {
+		Options json.RawMessage `json:"options"`
+	}
+	if err := json.Unmarshal([]byte(dataOf(events, "permission_requested")), &body); err != nil {
+		t.Fatal(err)
+	}
+	if string(body.Options) != string(options) {
+		t.Fatalf("permission_requested options = %s, want %s", body.Options, options)
+	}
+	h.must(ipc.Request{Method: ipc.MethodApprove, RunID: run.ID})
+	if done := h.waitStatus(run.ID, "finished"); done.Summary != "permission: approved" {
+		t.Errorf("summary = %q, want the approval reply", done.Summary)
+	}
+}
+
 func TestPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		method ipc.Method
