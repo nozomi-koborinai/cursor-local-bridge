@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -269,6 +272,229 @@ func TestDefaultHomeHonorsCLBHome(t *testing.T) {
 	if got != filepath.Join(home, ".clb") {
 		t.Fatalf("default = %s", got)
 	}
+}
+
+func TestSaveWebhookCreatesHome(t *testing.T) {
+	const (
+		key = "k3y-do-not-leak"
+		url = "https://example.com/hook?a=1&b=2"
+	)
+	home := filepath.Join(testHome(t), "missing")
+	created, err := SaveWebhook(home, url, "Bearer "+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("secretCreated = false")
+	}
+	assertMode(t, home, 0o700)
+	path := filepath.Join(home, "config.json")
+	assertMode(t, path, 0o600)
+	if temps := tempConfigs(t, home); len(temps) != 0 {
+		t.Fatalf("temp files left behind: %v", temps)
+	}
+
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Webhook.URL != url || got.Webhook.Headers["Authorization"] != "Bearer "+key {
+		t.Fatalf("webhook = %+v", got.Webhook)
+	}
+	if !is64Hex(got.Webhook.Secret) {
+		t.Fatalf("secret = %q", got.Webhook.Secret)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte("agentPath")) || bytes.Contains(body, []byte("socketPath")) || bytes.Contains(body, []byte("worktreeDir")) || bytes.Contains(body, []byte(`\u0026`)) {
+		t.Fatalf("file =\n%s", body)
+	}
+
+	again, err := SaveWebhook(home, url, "Bearer "+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again {
+		t.Fatal("secretCreated = true on the second call")
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, second) {
+		t.Fatalf("second write =\n%s\nfirst write =\n%s", second, body)
+	}
+}
+
+func TestSaveWebhookKeepsExistingFields(t *testing.T) {
+	const (
+		key    = "new-key"
+		secret = "keep-this-secret"
+		url    = "https://example.com/hook?a=1&b=2"
+	)
+	home := testHome(t)
+	if err := os.Chmod(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := `{
+  "agentPath": "/opt/agent",
+  "backend": "print",
+  "model": "composer",
+  "storeAllEvents": true,
+  "webhook": {"secret": "` + secret + `", "headers": {"authorization": "Bearer old", "AUTHORIZATION": "Bearer other", "X-Custom": "keep-me"}}
+}`
+	writeConfigMode(t, home, original, 0o644)
+
+	created, err := SaveWebhook(home, url, "Bearer "+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("secretCreated = true")
+	}
+	assertMode(t, home, 0o755)
+	path := filepath.Join(home, "config.json")
+	assertMode(t, path, 0o600)
+
+	want := `{
+  "agentPath": "/opt/agent",
+  "backend": "print",
+  "model": "composer",
+  "storeAllEvents": true,
+  "webhook": {
+    "headers": {
+      "Authorization": "Bearer new-key",
+      "X-Custom": "keep-me"
+    },
+    "secret": "keep-this-secret",
+    "url": "https://example.com/hook?a=1&b=2"
+  }
+}
+`
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != want {
+		t.Fatalf("file =\n%s\nwant =\n%s", body, want)
+	}
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentPath != "/opt/agent" || got.Backend != backend.Print || got.Model != "composer" || !got.StoreAllEvents {
+		t.Fatalf("cfg = %+v", got)
+	}
+	if got.Webhook.Secret != secret || got.Webhook.URL != url {
+		t.Fatalf("webhook = %+v", got.Webhook)
+	}
+	wantHeaders := map[string]string{"Authorization": "Bearer " + key, "X-Custom": "keep-me"}
+	if !reflect.DeepEqual(got.Webhook.Headers, wantHeaders) {
+		t.Fatalf("headers = %#v", got.Webhook.Headers)
+	}
+
+	again, err := SaveWebhook(home, url, "Bearer "+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again {
+		t.Fatal("secretCreated = true on the second call")
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, second) {
+		t.Fatalf("second write =\n%s", second)
+	}
+}
+
+func TestSaveWebhookRejectsAndLeavesTheFile(t *testing.T) {
+	const (
+		key    = "k3y-do-not-leak"
+		secret = "s3cret-do-not-leak"
+	)
+	tests := []struct {
+		name string
+		body string
+		url  string
+	}{
+		{name: "invalid URL", body: `{"webhook":{"secret":"` + secret + `"}}`, url: "ftp://example.com/hook"},
+		{name: "non-object", body: "[]\n", url: "https://example.com/hook"},
+		{name: "null", body: "null\n", url: "https://example.com/hook"},
+		{name: "unknown field", body: `{"theme":"dark","webhook":{"secret":"` + secret + `"}}`, url: "https://example.com/hook"},
+		{name: "webhook array", body: `{"webhook":["nope"]}`, url: "https://example.com/hook"},
+		{name: "headers array", body: `{"webhook":{"headers":["nope"],"secret":"` + secret + `"}}`, url: "https://example.com/hook"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := testHome(t)
+			writeConfigMode(t, home, tt.body, 0o644)
+			path := filepath.Join(home, "config.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = SaveWebhook(home, tt.url, "Bearer "+key)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			msg := err.Error()
+			if strings.Contains(msg, key) || strings.Contains(msg, secret) || strings.Contains(msg, "Bearer "+key) {
+				t.Fatalf("err includes a secret: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("file changed:\n%s", after)
+			}
+			assertMode(t, path, 0o644)
+			if temps := tempConfigs(t, home); len(temps) != 0 {
+				t.Fatalf("temp files left behind: %v", temps)
+			}
+		})
+	}
+	t.Run("missing home", func(t *testing.T) {
+		home := filepath.Join(testHome(t), "missing")
+		if _, err := SaveWebhook(home, "ftp://example.com/hook", "Bearer "+key); err == nil {
+			t.Fatal("expected error")
+		}
+		if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("home after a rejected save: %v", err)
+		}
+	})
+}
+
+func is64Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	raw, err := hex.DecodeString(s)
+	return err == nil && len(raw) == 32
+}
+
+func assertMode(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != mode {
+		t.Fatalf("%s mode = %#o, want %#o", path, info.Mode().Perm(), mode)
+	}
+}
+
+func tempConfigs(t *testing.T, home string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(home, "config.json.*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
 }
 
 func testHome(t *testing.T) string {
