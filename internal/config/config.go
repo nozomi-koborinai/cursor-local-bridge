@@ -100,8 +100,6 @@ func Load(home string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// 0o077 includes group and other write. Write lets another user point
-	// webhook.url at their own server and collect the secret or header values.
 	if err := rejectSharedWebhookFile(path, info.Mode(), cfg.Webhook); err != nil {
 		return Config{}, err
 	}
@@ -173,15 +171,16 @@ func parse(path string, data []byte, home string) (Config, error) {
 
 func rejectSharedWebhookFile(path string, mode os.FileMode, hook Webhook) error {
 	perm := mode.Perm()
+	// 0o077 includes group and other write. Write lets another user point
+	// webhook.url at their own server and collect the secret or header values.
 	if (hook.Secret != "" || len(hook.Headers) > 0) && perm&0o077 != 0 {
 		return fmt.Errorf("%s: mode %#o lets other users read or change webhook.secret or webhook.headers; run chmod 600 %s", path, perm, path)
 	}
 	return nil
 }
 
-// applyWebhook edits the JSON document. Fields other than the webhook url,
-// secret, and headers stay raw, so the file does not gain defaults or
-// resolved paths.
+// Decoding into Config would write defaults and resolved paths into the file,
+// so applyWebhook edits the raw JSON document instead.
 func applyWebhook(path string, data []byte, webhookURL, authorization string) ([]byte, bool, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(data, &doc); err != nil {

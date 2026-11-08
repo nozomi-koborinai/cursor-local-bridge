@@ -20,8 +20,6 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 )
 
-// valueInput is one secret the setup command reads. The source is the env
-// var when it is non-empty, and otherwise a hidden prompt or a stdin line.
 type valueInput struct {
 	env    string
 	prompt string
