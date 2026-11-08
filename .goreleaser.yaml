@@ -27,6 +27,9 @@ changelog:
   use: github
   sort: asc
 
+release:
+  prerelease: auto
+
 homebrew_casks:
   - name: clb
     binaries: [clb]
@@ -36,4 +39,12 @@ homebrew_casks:
     repository:
       owner: nozomi-koborinai
       name: homebrew-tap
-    skip_upload: true
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: '{{ if isEnvSet "HOMEBREW_TAP_TOKEN" }}auto{{ else }}true{{ end }}'
+    # The binary is not signed or notarized.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/clb"]
+          end

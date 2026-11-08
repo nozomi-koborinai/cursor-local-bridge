@@ -34,4 +34,18 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 - Add or update a test that fails without your change.
 - Write code, comments, and docs in English.
 
+## Release a version
+
+A tag publishes a release. After the release commit is on `main`, push a tag from it:
+
+```sh
+git switch main && git pull
+git tag -a v0.1.0 -m v0.1.0
+git push origin v0.1.0
+```
+
+The tag starts `.github/workflows/release.yml`. It runs every CI job, then GoReleaser publishes the GitHub Release with the archives and `checksums.txt`. When the repository secret `HOMEBREW_TAP_TOKEN` is set, GoReleaser also pushes `Casks/clb.rb` to `nozomi-koborinai/homebrew-tap`. Without the secret, the release still succeeds and the tap does not change. A tag with a prerelease suffix, such as `v0.2.0-rc.1`, publishes a prerelease and skips the tap.
+
+To check the release config before you tag, run `goreleaser check` and `goreleaser release --snapshot --clean`. The workflows pin GoReleaser to one version. Change `release.yml` and the `release-config` job in `ci.yml` together.
+
 By contributing, you agree that your contribution is licensed under the MIT License in `LICENSE`.
