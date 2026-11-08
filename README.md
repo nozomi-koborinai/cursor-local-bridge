@@ -23,7 +23,37 @@ Use it in environments where cloud agents are not available.
 - macOS or Linux
 - git
 - The [Cursor CLI](https://cursor.com/cli), logged in with `agent login`
-- Go 1.27 or later, to build `clb`
+- Go 1.27 or later, only to install `clb` with `go install`
+
+## Install
+
+Install with Homebrew on macOS or Linux:
+
+```sh
+brew install --cask nozomi-koborinai/tap/clb
+```
+
+The `clb` binary is not signed or notarized. On macOS, the cask removes the quarantine attribute from `clb` after it installs, so that Gatekeeper does not block it.
+
+Install with Go:
+
+```sh
+go install github.com/nozomi-koborinai/cursor-local-bridge/cmd/clb@latest
+```
+
+Or download the archive for your system from [Releases](https://github.com/nozomi-koborinai/cursor-local-bridge/releases). Each archive holds `clb`, the license, this README, and the launchd plist. Replace `0.1.0` and `darwin_arm64` with the version and system that you want. The systems are `darwin_amd64`, `darwin_arm64`, `linux_amd64`, and `linux_arm64`.
+
+```sh
+base=https://github.com/nozomi-koborinai/cursor-local-bridge/releases/download/v0.1.0
+curl -fsSLO "$base/clb_0.1.0_darwin_arm64.tar.gz"
+curl -fsSLO "$base/checksums.txt"
+grep clb_0.1.0_darwin_arm64.tar.gz checksums.txt | shasum -a 256 -c
+tar -xzf clb_0.1.0_darwin_arm64.tar.gz
+```
+
+Then move `clb` to a directory on your `PATH`. A browser marks a downloaded file with the macOS quarantine attribute, and `curl` does not. If you downloaded the archive with a browser, run `xattr -d com.apple.quarantine clb` before you run `clb`.
+
+`clb --version` prints the installed version.
 
 ## Quickstart
 
@@ -34,10 +64,10 @@ Use it in environments where cloud agents are not available.
    agent login
    ```
 
-2. Install `clb`:
+2. Install `clb`. [Install](#install) lists the other ways:
 
    ```sh
-   go install github.com/nozomi-koborinai/cursor-local-bridge/cmd/clb@latest
+   brew install --cask nozomi-koborinai/tap/clb
    ```
 
 3. Start the daemon in its own terminal. It logs to stderr and runs until you press Ctrl-C:
@@ -357,7 +387,7 @@ When `config.json` sets `webhook.secret` or `webhook.headers`, `clb` refuses to 
 
 ## Run the daemon with launchd
 
-`packaging/launchd/io.github.nozomi-koborinai.clb.plist` starts `clb daemon` at login and restarts it if it exits. launchd does not expand `~`, so the file has placeholders.
+`packaging/launchd/io.github.nozomi-koborinai.clb.plist` starts `clb daemon` at login and restarts it if it exits. launchd does not expand `~`, so the file has placeholders. The file is in each release archive and in the repository. The Homebrew cask and `go install` do not install it, so run these commands from an extracted archive or a clone.
 
 1. Create the directory for the log file. launchd does not create it:
 
