@@ -46,5 +46,5 @@ homebrew_casks:
       post:
         install_steps: |
           on_macos do
-            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/clb"]
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "clb"], chdir: "."
           end
