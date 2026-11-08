@@ -11,37 +11,38 @@ Use it in environments where cloud agents are not available.
 ## How it works
 
 - `clb daemon` runs in the background and listens on a unix socket that only your user can open.
-- `clb launch` creates a run. The daemon adds a git worktree for the run on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com).
-- The daemon stores every run and the events the agent streams in SQLite. [Events](#events) lists the types it skips. When a follow-up resumes a session, the history the agent replays is not stored again. The daemon also writes each run's events to an NDJSON file that you can `tail -f`.
-- When the Cursor CLI sends a permission request, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`, and `clb` passes your answer back. Whether the CLI asks before it uses a tool depends on the CLI's own settings. It can apply a file edit without asking. See [Security](#security).
-- When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if you configured one. `clb webhook setup` configures it.
+- `clb launch` creates a run. The daemon adds a git worktree on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com).
+- The daemon stores every run and its streamed events in SQLite (skipping noisy types listed in [Events](#events) and replayed history on session resume) and mirrors them to an NDJSON file you can `tail -f`.
+- When the Cursor CLI requests permission for a tool call, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`. Whether the CLI asks before using a tool depends on the CLI's own settings; it can apply a file edit without asking. See [Security](#security).
+- When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if configured via `clb webhook setup`.
 
-`clb` uses the login of the Cursor CLI on your machine. It does not need or accept an API key.
+`clb` uses the login of the Cursor CLI on your machine (`agent login`). It does not need or accept an API key.
 
 ## Requirements
 
 - macOS or Linux
 - git
 - The [Cursor CLI](https://cursor.com/cli), logged in with `agent login`
-- Go 1.27 or later, only to install `clb` with `go install`
+- Go 1.27 or later, only when installing with `go install`
 
 ## Install
 
-Install with Homebrew on macOS or Linux:
+Install with Homebrew on macOS or Linux (on macOS, the cask clears the quarantine attribute so Gatekeeper does not block the unsigned binary):
 
 ```sh
 brew install --cask nozomi-koborinai/tap/clb
 ```
 
-The `clb` binary is not signed or notarized. On macOS, the cask removes the quarantine attribute from `clb` after it installs, so that Gatekeeper does not block it.
-
-Install with Go:
+Or install with Go:
 
 ```sh
 go install github.com/nozomi-koborinai/cursor-local-bridge/cmd/clb@latest
 ```
 
-Or download the archive for your system from [Releases](https://github.com/nozomi-koborinai/cursor-local-bridge/releases). Each archive holds `clb`, the license, this README, and the launchd plist. Replace `0.1.0` and `darwin_arm64` with the version and system that you want. The systems are `darwin_amd64`, `darwin_arm64`, `linux_amd64`, and `linux_arm64`.
+<details>
+<summary>Install from a release archive</summary>
+
+Download the archive for your system (`darwin_amd64`, `darwin_arm64`, `linux_amd64`, or `linux_arm64`) from [Releases](https://github.com/nozomi-koborinai/cursor-local-bridge/releases):
 
 ```sh
 base=https://github.com/nozomi-koborinai/cursor-local-bridge/releases/download/v0.1.0
@@ -51,7 +52,9 @@ grep clb_0.1.0_darwin_arm64.tar.gz checksums.txt | shasum -a 256 -c
 tar -xzf clb_0.1.0_darwin_arm64.tar.gz
 ```
 
-Then move `clb` to a directory on your `PATH`. A browser marks a downloaded file with the macOS quarantine attribute, and `curl` does not. If you downloaded the archive with a browser, run `xattr -d com.apple.quarantine clb` before you run `clb`.
+Move `clb` to a directory on your `PATH`. If you downloaded the archive with a browser on macOS, run `xattr -d com.apple.quarantine clb` first.
+
+</details>
 
 `clb --version` prints the installed version.
 
@@ -64,58 +67,46 @@ Then move `clb` to a directory on your `PATH`. A browser marks a downloaded file
    agent login
    ```
 
-2. Install `clb`. [Install](#install) lists the other ways:
+2. Install `clb` (see [Install](#install) for other methods):
 
    ```sh
    brew install --cask nozomi-koborinai/tap/clb
    ```
 
-3. Start the daemon in its own terminal. It logs to stderr and runs until you press Ctrl-C:
+3. Start the daemon in its own terminal (or at login via [launchd](#run-the-daemon-with-launchd)):
 
    ```sh
    clb daemon
    ```
 
-   To start it at login on macOS, see [Run the daemon with launchd](#run-the-daemon-with-launchd).
-
-4. In another terminal, launch a run from inside a git repository:
+4. In another terminal, launch a run from inside a git repository and note its `id` from the JSON output:
 
    ```sh
    cd ~/src/my-project
    clb launch "Add a --verbose flag to the CLI and document it in the README"
    ```
 
-   `clb` prints the run as JSON. Copy its `id`, for example `run-3f9a2c7d1e0b`.
-
-5. Watch the run:
+5. Watch the run, answer any permission prompt, and follow up or stop when finished:
 
    ```sh
    clb status run-3f9a2c7d1e0b
    clb logs --follow run-3f9a2c7d1e0b
-   ```
-
-6. If `status` is `awaiting_permission`, read `pendingPermission` and answer it:
-
-   ```sh
    clb approve run-3f9a2c7d1e0b
-   ```
-
-7. When `status` is `finished`, read `summary`, then send a follow-up or stop the run:
-
-   ```sh
    clb followup run-3f9a2c7d1e0b "Also add a test for the flag"
    clb stop run-3f9a2c7d1e0b
    ```
 
-   `clb stop` commits any uncommitted changes to the branch `clb/run-3f9a2c7d1e0b`, then removes the worktree. The branch stays, so the agent's work is kept.
+   `clb stop` commits any uncommitted changes to `clb/run-3f9a2c7d1e0b` and removes the worktree while keeping the branch.
 
 ## Example: Grok Bot
 
-In this example, Grok Bot drives Cursor Local Bridge for you. Grok Bot runs `clb` commands on your machine through a remote shell, and the daemon tells Grok Bot when a run ends by posting to a routine's webhook trigger. Any assistant that can run shell commands and receive a webhook can follow the same steps.
+Grok Bot (or any assistant that can run remote shell commands and receive a webhook) can drive `clb` for you.
 
-1. Keep `clb daemon` running on the machine. To start it at login on macOS, see [Run the daemon with launchd](#run-the-daemon-with-launchd).
+1. Keep `clb daemon` running on your machine (see [Run the daemon with launchd](#run-the-daemon-with-launchd)).
+2. Paste the prompt below into a chat with Grok Bot to create a webhook routine (`clb notices`) and save a `clb` skill:
 
-2. Paste this prompt into a chat with Grok Bot. Grok Bot creates a routine with a webhook trigger that turns each `clb` notice into a short message, and saves a skill that says how to drive `clb`:
+   <details>
+   <summary>Prompt for Grok Bot</summary>
 
    ```text
    I use Cursor Local Bridge, a command named clb, to connect you to Cursor agents on my own machine. It is how I want you to work in my local repositories when cloud agents are not available. You run clb through the remote shell. Set up the two things below, then tell me the next step.
@@ -139,101 +130,55 @@ In this example, Grok Bot drives Cursor Local Bridge for you. Grok Bot runs `clb
    3. When both are saved, tell me to open the routine's panel, run `clb webhook setup --test` in a terminal on my machine, and paste the routine's Webhook URL and sender key at its prompts. Do not run that command yourself, do not ask me for the key, and remind me never to paste the key into this chat.
    ```
 
-3. Open the routine's panel. In a terminal on your machine, run:
+   </details>
 
-   ```sh
-   clb webhook setup --test
-   ```
-
-   Paste the routine's Webhook URL at the first prompt and its sender key at the second. The prompts do not show what you paste. `clb` writes both to `~/.clb/config.json`, creates a signing secret, and sends a test delivery. The routine then sends you "clb webhook test received." The running daemon uses the new settings from its next delivery, so you do not restart it. See [Set up the webhook](#set-up-the-webhook).
-
-   Never paste the sender key into a chat, including a chat with Grok Bot. Anyone who has the key can start the routine.
-
-4. Ask Grok Bot for a change. Grok Bot launches a run and keeps the `id` from the JSON that `clb` prints:
-
-   ```sh
-   clb launch --repo ~/src/my-project "Fix the flaky date test in parser_test.go"
-   ```
-
-5. To follow the run, Grok Bot reads its status and its events:
-
-   ```sh
-   clb status run-3f9a2c7d1e0b
-   clb logs run-3f9a2c7d1e0b
-   ```
-
-   `clb logs --follow` blocks until the run is no longer active. If the remote shell limits how long a command can run, poll `clb status` instead. If `status` is `awaiting_permission`, Grok Bot shows you `pendingPermission` and runs `clb approve` or `clb deny` with your answer.
-
-6. To change course, Grok Bot sends a follow-up. To end the run, it stops the run:
-
-   ```sh
-   clb followup run-3f9a2c7d1e0b "Also cover dates before 1970"
-   clb stop run-3f9a2c7d1e0b
-   ```
-
-7. When the run reaches `finished`, `failed`, or `stopped`, the daemon posts the signed payload to the webhook trigger, and the routine sends you a short notice with the run's `id`, `status`, and `branch`, and the first line of `summary`, or of `error` for a failed run. The routine only reports. To continue, ask Grok Bot for the next step. If the receiver can compute HMAC-SHA256, have it check `X-Clb-Signature` before it acts on the payload. See [Webhook](#webhook).
-
-The daemon sends the webhook from your machine, so the trigger's URL must be reachable from there.
+3. Open the routine's panel, run `clb webhook setup --test` in a local terminal, and paste the routine's Webhook URL and sender key at the hidden prompts. Never paste the sender key into a chat. The running daemon picks up the new settings automatically (see [Set up the webhook](#set-up-the-webhook)).
+4. Ask Grok Bot for a change in a local repository. It runs `clb launch --repo <path> "<prompt>"`, polls `clb status` and `clb logs`, asks you before running `clb approve` or `clb deny`, and sends `clb followup` or `clb stop`. When a run ends, the daemon posts to the webhook trigger (which must be reachable from your machine) and the routine sends you a short notice.
 
 ## Run lifecycle
-
-A run is in exactly one of these states.
 
 | Status | Meaning |
 | --- | --- |
 | `queued` | The daemon is creating the worktree and starting the agent. |
 | `running` | The agent is working on a prompt. |
-| `awaiting_permission` | The agent sent a permission request for a tool call and waits until you approve or deny it. |
-| `finished` | The agent ended its turn and no prompts are queued. The daemon closes the agent process, and a follow-up starts a new one. |
-| `failed` | The agent process failed. `error` says why. The worktree stays until you run `clb stop`. |
+| `awaiting_permission` | The agent requested permission for a tool call and waits for `approve` or `deny`. |
+| `finished` | The agent ended its turn with no queued prompts. The agent process closes; a follow-up starts a new one. |
+| `failed` | The agent process or worktree cleanup failed (`error` says why). The worktree stays until `clb stop` succeeds. |
 | `stopped` | You stopped the run. Its worktree is removed, and its changes are on the run's branch. |
-
-The commands change the state as follows.
 
 | Command | Allowed in | Effect |
 | --- | --- | --- |
 | `launch` | | Creates a run in `queued`. |
-| `followup` | `queued`, `running`, `awaiting_permission` | Queues the prompt. The agent gets it when its current turn ends. |
-| `followup` | `finished` | Starts the agent again on the same session and sends the prompt. The run goes back to `queued`. |
+| `followup` | `queued`, `running`, `awaiting_permission` | Queues the prompt for when the current turn ends. |
+| `followup` | `finished` | Resumes the session in a new agent process and moves the run to `queued`. |
 | `approve`, `deny` | `awaiting_permission` | Answers the oldest pending permission request. |
-| `stop` | any | Stops the agent, commits uncommitted changes to the run's branch, removes the worktree, and moves the run to `stopped`. If the commit or the removal fails, the worktree stays and the run moves to `failed`. A `failed` run stays `failed`. Stopping again only retries the worktree cleanup. |
+| `stop` | any | Stops the agent, commits uncommitted changes (including untracked files, excluding ignored files, skipping hooks and signing, falling back to author `clb <clb@localhost>`) to the run's branch, removes the worktree, and moves the run to `stopped`. If cleanup fails, the worktree stays and the run moves to `failed` (`error` starts with `remove worktree: `). Stopping a `failed` run retries cleanup while keeping `failed`. |
 
-A command in a state that does not allow it fails with a `conflict` error and changes nothing. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
+A command in a disallowed state fails with a `conflict` error. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
 
-The commit that `clb stop` makes includes untracked files but not ignored ones. It skips the repository's commit hooks and commit signing, because the daemon has no terminal to answer them. If your git config has no `user.name` or `user.email`, the commit's author is `clb <clb@localhost>`. When the commit or the removal fails, `error` is `remove worktree: ` followed by git's message, and `clb stop` prints that message with the `internal` code.
-
-When the daemon closes an agent process, it also ends the processes that the agent started, such as a dev server or a command that it ran in the background. It finds them in three ways:
-
-- It adds a `CLB_PROC_TOKEN` variable to the agent's environment and ends the processes that inherited it. With the `print` backend, this happens after each prompt. macOS 26 can hide one process's environment from another, even for the same user, and then this way finds nothing.
-- On macOS, it watches the agent process start other processes, and those start more, and ends every one it saw start. When one of them exits, it also takes the processes left in that one's process group. This way does not read environments. It can miss a process that left its parent's process group if the parent exited right after starting it.
-- It ends your processes whose working directory is inside the run's worktree. The Cursor CLI starts terminal commands with an empty environment, so the token does not reach them. This happens after the agent process closes, when the run finishes, fails, or stops, or when the daemon shuts down. It happens again just before `clb stop` removes the worktree.
-
-The third way also ends a process of yours that is not the agent's, such as a shell that you opened in the worktree. `clb` sends SIGTERM, then SIGKILL to any that still run 1 second later. It never matches a working directory outside the run's worktree.
-
-If the daemon stops while runs are active, it marks those runs `failed` when it starts again. First it ends the processes whose working directory is inside those runs' worktrees, such as a command that the agent left running.
+When an agent process closes—or when the daemon restarts and marks previously active runs `failed`—the daemon ends any background processes the agent left behind (SIGTERM, then SIGKILL after 1s). It matches processes by an inherited `CLB_PROC_TOKEN` variable, a macOS process-tree watch, and any of your processes whose working directory is inside the run's worktree (including a shell you opened there).
 
 ## Commands
 
-Every command except `daemon` and `logs` prints one JSON value on stdout. Errors go to stderr as `clb: <message>`, with exit code 1.
+Every command except `daemon` and `logs` prints one JSON value on stdout. Errors go to stderr as `clb: <code>: <message>` (`invalid`, `not_found`, `conflict`, or `internal`) with exit code 1. Every command accepts `--home DIR` (see [Configuration](#configuration)), and a `PROMPT` of `-` reads from stdin.
 
 | Command | Prints |
 | --- | --- |
 | `clb daemon` | Runs the daemon in the foreground. |
-| `clb launch [--repo DIR] [--ref REF] [--model MODEL] [--backend acp\|print] PROMPT` | The new run. `--repo` defaults to the current directory and `--ref` to `HEAD`. `--ref` must name a commit and cannot start with `-`. |
+| `clb launch [--repo DIR] [--ref REF] [--model MODEL] [--backend acp\|print] PROMPT` | The new run. `--repo` defaults to `.` and `--ref` to `HEAD` (must name a commit and not start with `-`). |
 | `clb status ID` | The run. |
 | `clb list` | An array of all runs, newest first. |
 | `clb followup ID PROMPT` | The run. |
 | `clb approve ID`, `clb deny ID` | The run. |
-| `clb stop ID` | The run, after its worktree is removed. If the removal fails, the error, with exit code 1. |
-| `clb logs [--follow] ID` | The run's events, one JSON object per line. `--follow` waits for new events until the run is no longer active. |
-| `clb webhook setup [--test]` | `config`, the path of `config.json`, `webhookHost`, the host of the webhook URL, and `secretCreated`, which is `true` when `clb` created `webhook.secret`. With `--test`, also `test.httpStatus`. See [Set up the webhook](#set-up-the-webhook). |
-| `clb webhook test` | `httpStatus`, the HTTP status that the receiver returned for a test delivery. |
-
-A `PROMPT` of `-` reads the prompt from stdin. Every command accepts `--home DIR`. See [Configuration](#configuration).
-
-An error message starts with a code that a script can match: `invalid`, `not_found`, `conflict`, or `internal`. For example, `clb approve` on a stopped run prints `clb: conflict: not allowed: cannot answer a permission for a stopped run`.
+| `clb stop ID` | The run after removing its worktree, or an error with exit code 1 if cleanup fails. |
+| `clb logs [--follow] ID` | The run's events as NDJSON. `--follow` streams until the run is no longer active. |
+| `clb webhook setup [--test]` | `config`, `webhookHost`, `secretCreated`, and (with `--test`) `test.httpStatus`. |
+| `clb webhook test` | `httpStatus` from a test delivery (`id` and `status` set to `test`). |
 
 ### Run object
+
+<details>
+<summary>Example run JSON</summary>
 
 ```json
 {
@@ -270,34 +215,29 @@ An error message starts with a code that a script can match: `invalid`, `not_fou
 }
 ```
 
-- Empty fields such as `summary`, `error`, and `model` are left out.
-- `summary` is the agent's reply text from its most recent turn. When tool calls split the reply into several blocks of text, `summary` joins the blocks with a newline.
-- `error` says why the run failed. When the agent process exited, it includes the first 512 bytes of the agent's stderr and how many bytes it left out. The webhook payload has the same text.
-- `queuedPrompts` counts prompts that the agent has not received yet.
-- `pendingPermission` is the oldest unanswered permission request. `toolCall` is the agent's description of the tool call, as sent by the Cursor CLI. For a shell command the Cursor CLI puts the command in `title` and the reason it asks, such as `Not in allowlist: npm`, in `content`.
-- `options` lists the choices the agent offered, as it sent them. `clb approve` picks the option whose `kind` is `allow_once`, and `clb deny` the one whose `kind` is `reject_once`. The `permission_requested` event carries the same `options`.
+</details>
+
+- Empty fields (`summary`, `error`, `model`, `pendingPermission`) are omitted.
+- `summary` joins the agent's reply text blocks from its most recent turn with newlines.
+- `error` says why the run failed, including up to the first 512 bytes of agent stderr.
+- `pendingPermission` is the oldest unanswered permission request. `clb approve` selects the option with `kind: "allow_once"` and `clb deny` selects `kind: "reject_once"` (or cancels if neither is offered).
 
 ### Events
 
-`clb logs` prints events like these:
+`clb logs` and `~/.clb/logs/<run id>.ndjson` contain one JSON object per line (SQLite is the source of truth; the daemon rewrites NDJSON files on startup):
 
 ```json
 {"runId":"run-3f9a2c7d1e0b","seq":1,"time":"2026-11-07T09:30:00.2Z","type":"status","data":{"status":"queued"}}
 {"runId":"run-3f9a2c7d1e0b","seq":4,"time":"2026-11-07T09:30:01.5Z","type":"agent_message_chunk","data":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I'll add"}}}
 ```
 
-- `status`, `prompt`, `permission_requested`, `permission_answered`, and `webhook` events come from the daemon.
-- Other types come from the agent unchanged. With the `acp` backend they are ACP `sessionUpdate` values such as `agent_message_chunk`, `tool_call`, and `plan`, plus `turn_ended`. With the `print` backend they are stream-json `type` values.
-- `turn_ended` marks the end of a turn that the agent finished. A run that you stop during a turn has no `turn_ended` event for that turn.
-- By default the daemon does not store `agent_thought_chunk` and `available_commands_update` events, or the `thinking` events of the `print` backend. The Cursor CLI sends them often, and in testing they made run logs large. To keep them, set `storeAllEvents` to `true` in the config file.
-- The Cursor CLI sends the first `tool_call` event for a shell command with `rawInput` set to `{}` and puts the command in a later `tool_call_update` event with the same `toolCallId`. A `tool_call_update` carries only the fields that changed. To get a tool's input, read the latest `rawInput` among the events for its `toolCallId`.
-- After you deny a permission request, the Cursor CLI does not run the command, but a later `tool_call_update` for that `toolCallId` still reports `status` as `completed`. To tell whether a command ran, find the `permission_requested` event whose `toolCall.toolCallId` matches, then read `approved` in the `permission_answered` event with the same `id`.
-
-The same lines are in `~/.clb/logs/<run id>.ndjson`. SQLite is the source of truth. The daemon rewrites the NDJSON files from SQLite when it starts.
+- `status`, `prompt`, `permission_requested`, `permission_answered`, and `webhook` come from the daemon; other types come from the agent (`acp` `sessionUpdate` values plus `turn_ended`, or `print` stream-json `type` values).
+- By default the daemon skips `agent_thought_chunk`, `available_commands_update`, and `print`-mode `thinking` events to keep logs small. Set `storeAllEvents` to `true` in `config.json` to keep them.
+- For shell commands in `acp`, the initial `tool_call` event has `rawInput: {}` and a later `tool_call_update` with the same `toolCallId` carries the command. After `clb deny`, the CLI does not run the command, even though a later `tool_call_update` still reports `status: "completed"`; check `approved` on the matching `permission_answered` event to tell whether it ran.
 
 ## Webhook
 
-To get a POST when a run ends, run [`clb webhook setup`](#set-up-the-webhook), or set `webhook.url` and `webhook.secret` in the config file. The body is:
+When a run enters `finished`, `failed`, or `stopped`, the daemon POSTs this JSON body (up to 3 attempts, retrying network errors and 5xx responses, reloading `webhook` settings from `config.json` on each delivery):
 
 ```json
 {
@@ -311,45 +251,12 @@ To get a POST when a run ends, run [`clb webhook setup`](#set-up-the-webhook), o
 }
 ```
 
-`status` is `finished`, `failed`, or `stopped`. A `failed` payload has `error`. A test delivery from `clb webhook test` has `id` and `status` set to `test`, and no run changes.
+A `failed` payload sets `error` instead of `summary`. Each request includes `Content-Type: application/json`, `User-Agent: clb-webhook/1`, `X-Clb-Event: statusChange`, `X-Clb-Delivery: <id>`, and `X-Clb-Signature: sha256=<hex HMAC-SHA256 of raw body using webhook.secret>`, plus any custom headers in `webhook.headers`.
 
-The request has these headers:
+`clb` rejects `webhook.headers` entries with invalid HTTP header names, control characters in values, case-insensitive duplicates, or reserved names (`Content-Type`, `User-Agent`, `X-Clb-*`, `Host`, `Content-Length`, `Transfer-Encoding`).
 
-| Header | Value |
-| --- | --- |
-| `Content-Type` | `application/json` |
-| `User-Agent` | `clb-webhook/1` |
-| `X-Clb-Signature` | `sha256=` and the hex HMAC-SHA256 of the raw body, keyed with `webhook.secret` |
-| `X-Clb-Event` | `statusChange` |
-| `X-Clb-Delivery` | An ID that stays the same when a delivery is retried |
-
-The daemon tries a delivery up to 3 times. It retries on network errors and 5xx responses.
-
-The daemon reads the webhook settings from `config.json` at each delivery, so a change applies from the next delivery without a restart. If the file does not load at that moment, the delivery fails, and the run's `webhook` event has the error. The other fields take effect when the daemon starts.
-
-To send more headers, such as a key that the receiver requires, set `webhook.headers`. The daemon adds them to every delivery, retries included:
-
-```json
-"webhook": {
-  "url": "https://example.com/hooks/clb",
-  "secret": "a long random string",
-  "headers": {
-    "Authorization": "Bearer <key>"
-  }
-}
-```
-
-Header names are case-insensitive. `clb` refuses to load a config file whose `webhook.headers` has any of these:
-
-- A name that is not a valid HTTP header name.
-- A value with a control character, such as CR or LF.
-- `Content-Type`, `User-Agent`, or a name that starts with `X-Clb-`. `clb` sets these headers itself.
-- `Host`, `Content-Length`, or `Transfer-Encoding`. Go's HTTP client sets these headers itself and ignores the configured value.
-- Two names that differ only in case.
-
-The error names the header but does not show its value. `clb` does not log header values. The signature covers only the body, so the extra headers do not change it.
-
-To check a signature, compute the HMAC over the exact bytes you received, then compare in constant time:
+<details>
+<summary>Verify X-Clb-Signature in Go</summary>
 
 ```go
 mac := hmac.New(sha256.New, []byte(secret))
@@ -358,124 +265,71 @@ want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
 ```
 
-### Set up the webhook
+</details>
 
-`clb webhook setup` asks for the webhook URL and the receiver's key, then writes them to `config.json`:
+### Set up the webhook
 
 ```sh
 clb webhook setup --test
 ```
 
-- It sets `webhook.url` and the header `Authorization: Bearer <key>`. If you paste the key with `Bearer ` in front, it does not add a second one.
-- If the file has no `webhook.secret`, it creates one from 32 random bytes. It keeps an existing secret.
-- It keeps every other field, and writes the file with sorted keys and two-space indentation.
-- It checks the new file the same way every command loads it. If the check fails, it changes nothing.
-- It writes the new file with mode 0600 and renames it over the old one, so the daemon never reads half a file. If the home directory does not exist, it creates it with mode 0700.
-- It prints the path of `config.json`, the host of the URL, and whether it created a secret. It never prints the key, the secret, or the rest of the URL.
-
-When stdin is a terminal, the prompts do not echo what you type or paste. To script the command, set `CLB_WEBHOOK_URL` and `CLB_WEBHOOK_KEY`, or send the URL and the key on two lines of stdin. `clb` does not take them as arguments, because other users can read a process's arguments with `ps`.
-
-`--test` sends a test delivery after the command saves the file. `clb webhook test` sends one at any time. The test delivery goes through the same sender as the daemon's deliveries, with the signature, the headers, and the retries. `clb` prints the HTTP status. If the receiver returns a status outside 2xx, or does not answer, the command exits with code 1 and prints the reason.
+`clb webhook setup` prompts for the webhook URL and receiver key without echoing input (for scripts, pass `CLB_WEBHOOK_URL` and `CLB_WEBHOOK_KEY` or two lines on stdin; CLI arguments are not accepted so secrets do not appear in `ps`). It sets `webhook.url` and `Authorization: Bearer <key>`, generates a 32-byte random `webhook.secret` if none exists, preserves other fields, and atomically writes `config.json` with mode `0600`. `--test` (or `clb webhook test`) sends a test delivery and exits with code 1 if the receiver does not return 2xx.
 
 ## Configuration
 
-`clb` keeps its files in `~/.clb`. Set `CLB_HOME` or pass `--home` to use another directory. The directory holds `config.json`, the database `clb.db`, the socket `clb.sock`, `logs/`, and `worktrees/`.
-
-`config.json` is optional. Every field is optional:
-
-```json
-{
-  "agentPath": "/Users/you/.local/bin/agent",
-  "backend": "acp",
-  "model": "",
-  "socketPath": "",
-  "worktreeDir": "",
-  "storeAllEvents": false,
-  "trustWorktree": false,
-  "webhook": {
-    "url": "https://example.com/hooks/clb",
-    "secret": "a long random string",
-    "headers": {
-      "Authorization": "Bearer <key>"
-    }
-  }
-}
-```
+`clb` stores `config.json`, `clb.db`, `clb.sock`, `logs/`, and `worktrees/` in `~/.clb` (override with `CLB_HOME` or `--home`). `config.json` and all of its fields are optional; relative paths resolve against the home directory, and unknown fields are rejected.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `agentPath` | `agent` | The Cursor CLI executable. |
-| `backend` | `acp` | `acp` or `print`. `clb launch --backend` overrides it. |
-| `model` | empty | Passed to the CLI as `--model`. Empty lets the CLI choose. `clb launch --model` overrides it. |
-| `socketPath` | `<home>/clb.sock` | The daemon socket. It must be shorter than 104 bytes. |
-| `worktreeDir` | `<home>/worktrees` | Where run worktrees go. |
-| `storeAllEvents` | `false` | Store `agent_thought_chunk`, `available_commands_update`, and `thinking` events too. |
-| `trustWorktree` | `false` | Pass `--trust` to `agent -p`. The `print` backend needs it. See [Backends](#backends). |
-| `webhook.url` | empty | Where to post run status changes. `clb webhook setup` sets it. |
-| `webhook.secret` | empty | The HMAC key. Required when `webhook.url` is set. `clb webhook setup` creates one if it is empty. |
-| `webhook.headers` | empty | Header names and values to add to every delivery. `clb webhook setup` sets `Authorization`. See [Webhook](#webhook). |
+| `backend` | `acp` | `acp` or `print`. Overridden by `clb launch --backend`. |
+| `model` | empty | Passed to the CLI as `--model`. Overridden by `clb launch --model`. |
+| `socketPath` | `<home>/clb.sock` | Daemon unix socket path (must be shorter than 104 bytes). |
+| `worktreeDir` | `<home>/worktrees` | Directory for run worktrees. |
+| `storeAllEvents` | `false` | Also store `agent_thought_chunk`, `available_commands_update`, and `thinking` events. |
+| `trustWorktree` | `false` | Pass `--trust` to `agent -p` (required for the `print` backend; see [Backends](#backends)). |
+| `webhook.url` | empty | Endpoint for run status webhooks. |
+| `webhook.secret` | empty | HMAC signing secret (required when `webhook.url` is set). |
+| `webhook.headers` | empty | Extra HTTP headers sent on every webhook delivery. |
 
-Relative paths resolve against the home directory. Unknown fields are an error.
-
-When `config.json` sets `webhook.secret` or `webhook.headers`, `clb` refuses to load it if the file's mode gives its group or other users any access. Write access counts too, because a user who can change `webhook.url` can collect the headers. Every `clb` command loads the file, so each one fails with the mode it found until you run `chmod 600 ~/.clb/config.json`. `clb webhook setup` is the exception. It does not load the old file this way, and it writes the new file with mode 0600. No other command creates or changes `config.json`.
+When `config.json` sets `webhook.secret` or `webhook.headers`, every `clb` command except `clb webhook setup` refuses to load it if group or other users have any permissions on the file; run `chmod 600 ~/.clb/config.json` to fix it.
 
 ## Backends
 
-- `acp`, the default, runs `agent acp` and talks to it over the Agent Client Protocol on stdio. One agent process serves a run until the run finishes. The permission requests the CLI sends reach you through `awaiting_permission`.
-- `print` runs `agent -p [--trust] --output-format stream-json --resume <chat id>` once per prompt, with `--trust` only when `trustWorktree` is `true`. It gets the chat ID from `agent create-chat`. Print mode cannot ask for permission, and `clb` never passes `--force`, so the CLI decides on its own which tools it may run. Use it only if `acp` does not work for you.
-
-`agent -p` refuses to run in a workspace that you have not trusted, and every run gets a new worktree. To use the `print` backend, set `trustWorktree` to `true` in the config file, and `clb` passes `--trust`. `--trust` trusts the workspace without a prompt. Unlike `--force`, it does not allow commands. Without `trustWorktree`, `clb launch --backend print` and `clb followup` on a print run fail with an `invalid` error that says how to turn it on.
+- `acp` (default) runs `agent acp` over stdio for the duration of a turn and forwards permission prompts via `awaiting_permission`.
+- `print` runs `agent -p --trust --output-format stream-json --resume <chat id>` once per prompt using a chat ID from `agent create-chat`. Because `agent -p` requires workspace trust for each new worktree and cannot prompt interactively, using `print` requires `"trustWorktree": true` in `config.json` (`--trust` trusts the worktree without enabling `--force`). Use `print` only if `acp` does not work for you.
 
 ## Run the daemon with launchd
 
-`packaging/launchd/io.github.nozomi-koborinai.clb.plist` starts `clb daemon` at login and restarts it if it exits. launchd does not expand `~`, so the file has placeholders. The file is in each release archive and in the repository. The Homebrew cask and `go install` do not install it, so run these commands from an extracted archive or a clone.
+From a release archive or repository clone, render the placeholders in `packaging/launchd/io.github.nozomi-koborinai.clb.plist` and load the agent:
 
-1. Create the directory for the log file. launchd does not create it:
+```sh
+mkdir -p -m 700 ~/.clb
+sed -e "s|__CLB__|$(command -v clb)|" -e "s|__HOME__|$HOME|g" \
+  packaging/launchd/io.github.nozomi-koborinai.clb.plist \
+  > ~/Library/LaunchAgents/io.github.nozomi-koborinai.clb.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.nozomi-koborinai.clb.plist
+```
 
-   ```sh
-   mkdir -p -m 700 ~/.clb
-   ```
-
-2. Fill in the placeholders and install the file:
-
-   ```sh
-   sed -e "s|__CLB__|$(command -v clb)|" -e "s|__HOME__|$HOME|g" \
-     packaging/launchd/io.github.nozomi-koborinai.clb.plist \
-     > ~/Library/LaunchAgents/io.github.nozomi-koborinai.clb.plist
-   ```
-
-3. Load it:
-
-   ```sh
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.nozomi-koborinai.clb.plist
-   ```
-
-The daemon logs to `~/.clb/daemon.log`. The plist puts `~/.local/bin`, where the Cursor CLI installer puts `agent`, on `PATH`. If `agent` is somewhere else, set `agentPath` in `config.json`.
+The daemon logs to `~/.clb/daemon.log` and includes `~/.local/bin` on `PATH`. If `agent` is installed elsewhere, set `agentPath` in `config.json`.
 
 ## Security
 
-- The socket is mode 0600, and the daemon checks that each connecting process runs as the same user. `clb` creates `~/.clb` and its subdirectories with mode 0700 and the database and logs with mode 0600. It does not change the mode of a directory that already exists. It refuses a `config.json` that holds a webhook secret or headers and that other users can access. See [Configuration](#configuration).
-- `clb webhook setup` reads the webhook URL and key without echo, or from environment variables or stdin, and never from its arguments. It writes `config.json` with mode 0600 and never prints the key or the secret.
-- `clb` forwards each permission request that the Cursor CLI sends and answers it only when you run `clb approve` or `clb deny`. It never passes `--force` or `--yolo` to the CLI. It passes `--trust` to `agent -p` only when `trustWorktree` is `true`.
-- Whether the CLI sends a request before it uses a tool depends on the CLI's own settings, not on `clb`. In testing with a logged-in CLI, the agent applied a file edit without sending a request. To block a tool or a path outright, add it to `permissions.deny` in `~/.cursor/cli-config.json` or the project's `.cursor/cli.json`. See [Permissions](https://cursor.com/docs/cli/reference/permissions) in the Cursor CLI docs.
-- `approve` and `deny` answer only the request in front of you. `clb` picks the agent's "allow once" or "reject once" option and never an "always" option. If the agent offers no such option, `clb` answers `cancelled`.
-- An agent runs with your user's rights in its worktree. Review the run's branch before you merge it.
-- When a run's agent closes, `clb` ends every process of yours whose working directory is inside that run's worktree, including a shell that you opened there. See [Run lifecycle](#run-lifecycle).
+- The daemon creates `~/.clb` and subdirectories with mode `0700`, database and log files with mode `0600`, and `clb.sock` with mode `0600` while verifying peer credentials match your user.
+- `clb` never passes `--force` or `--yolo` to the Cursor CLI, and only selects single-use permission options (`allow_once` or `reject_once`, never `allow_always`).
+- Whether the CLI asks before running a tool depends on the CLI's own settings—by default it can edit files without asking. To block specific tools or paths, configure `permissions.deny` in `~/.cursor/cli-config.json` or `.cursor/cli.json` (see Cursor CLI [Permissions](https://cursor.com/docs/cli/reference/permissions)).
+- An agent runs with your user's privileges in its worktree, and `clb` ends any of your processes whose working directory is inside that worktree when the agent closes. Review the run's branch before merging.
 
 ## Known gaps
 
-Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered these parts of the `acp` backend: streamed events, a file edit, an approved and a denied permission request, a follow-up that resumes the session with `session/load`, `--model`, the error for an unknown model, the newlines in `summary`, and a stop during a turn. They also covered the `print` backend with `trustWorktree`, for a launch and a follow-up. These parts are tested against the fake agent only:
+Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered the main `acp` flows (streaming events, file edits, approve/deny permission requests, `session/load` follow-up, `--model`, unknown-model errors, multi-block `summary`, and mid-turn `stop`) and `print` launch/follow-up with `trustWorktree`. Process cleanup and hidden-environment edge cases are tested against the fake agent in CI.
 
-- Ending the background commands of the real Cursor CLI by their working directory. The fake agent starts its background command the way the real CLI does, with an empty environment, in its own session, and in the worktree. The macOS code that reads another process's working directory runs in the macOS CI jobs.
-- Watching the real Cursor CLI's processes start on macOS. The macOS CI jobs cover a `node` process that starts a detached command with an empty environment, as the CLI's runtime does, and a shell that starts a background command and exits at once.
-- Hidden environments. GitHub's macOS runners have System Integrity Protection off and show other processes' environments. Tests whose stray process has an empty environment stand in for a system that hides them.
+Remaining limitations:
 
-Other gaps:
-
-- On Linux, a command that the agent starts outside the worktree with an empty environment keeps running after the run ends. On macOS, such a command keeps running only if it also left its parent's process group and the parent exited right after starting it.
-- The Cursor CLI creates a folder in `~/.cursor/projects` for each run's worktree, named after the worktree path, such as `~/.cursor/projects/<path>-worktrees-run-3f9a2c7d1e0b`. `clb` does not remove these folders.
-- When `agent -p --resume` gets a chat ID that the CLI does not know, it starts a new chat and reports no error. A follow-up on a `print` run then reaches an agent without the earlier conversation, and `clb` cannot tell.
-- A webhook that is still being delivered when the daemon stops is not retried after a restart.
+- A background process started outside the worktree with an empty environment survives after the run ends on Linux, and on macOS if its parent exited immediately after placing it in a new process group.
+- `clb` does not remove the per-worktree folders that the Cursor CLI creates in `~/.cursor/projects/`.
+- `agent -p --resume` silently starts a new chat if given an unknown chat ID, so `clb` cannot detect lost context on `print` follow-ups.
+- A webhook delivery in flight when the daemon stops is not retried after restart.
 
 ## Contributing
 
