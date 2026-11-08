@@ -42,11 +42,15 @@ type app struct {
 	homeErr error
 }
 
-func (a *app) config() (config.Config, error) {
+func (a *app) absHome() (string, error) {
 	if a.home == "" {
-		return config.Config{}, fmt.Errorf("find the clb home: %w; pass --home", a.homeErr)
+		return "", fmt.Errorf("find the clb home: %w; pass --home", a.homeErr)
 	}
-	home, err := filepath.Abs(a.home)
+	return filepath.Abs(a.home)
+}
+
+func (a *app) config() (config.Config, error) {
+	home, err := a.absHome()
 	if err != nil {
 		return config.Config{}, err
 	}
@@ -74,6 +78,7 @@ func newRoot(version string) *cobra.Command {
 		a.runCmd("deny", "Deny the run's oldest pending permission", ipc.MethodDeny),
 		a.listCmd(),
 		a.logsCmd(),
+		a.webhookCmd(),
 	)
 	return root
 }
