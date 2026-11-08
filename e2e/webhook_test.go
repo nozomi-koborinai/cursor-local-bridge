@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -125,7 +124,9 @@ func TestWebhookCommands(t *testing.T) {
 		session.write(t, "https://example.com/interrupt-path\n")
 		session.waitFor(t, "Key (input hidden): ")
 		session.waitEcho(t, false)
-		session.write(t, "\x03")
+		if err := session.cmd.Process.Signal(os.Interrupt); err != nil {
+			t.Fatal(err)
+		}
 		err := session.wait(t)
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 130 {
@@ -403,7 +404,8 @@ func (c *clb) startPTY(t *testing.T, args ...string) *ptySession {
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	// Not the controlling terminal: macOS revokes a session's terminal when the
+	// session leader exits, and the test reads the termios after clb exits.
 	if err := cmd.Start(); err != nil {
 		_ = master.Close()
 		_ = slave.Close()
