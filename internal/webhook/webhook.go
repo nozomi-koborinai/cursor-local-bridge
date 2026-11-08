@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -146,15 +147,16 @@ type Sender struct {
 
 // Send posts p and retries on network errors and 5xx responses until
 // Attempts runs out or ctx ends. A 2xx response is success. Other responses
-// fail without retry.
-func (s *Sender) Send(ctx context.Context, p Payload) error {
+// fail without retry. The int is the status code of the last response
+// received, or 0 when none arrived.
+func (s *Sender) Send(ctx context.Context, p Payload) (int, error) {
 	body, err := json.Marshal(p)
 	if err != nil {
-		return fmt.Errorf("webhook payload: %w", err)
+		return 0, fmt.Errorf("webhook payload: %w", err)
 	}
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		return fmt.Errorf("webhook delivery id: %w", err)
+		return 0, fmt.Errorf("webhook delivery id: %w", err)
 	}
 	delivery := hex.EncodeToString(buf[:])
 	sig := Sign(s.Secret, body)
@@ -170,28 +172,32 @@ func (s *Sender) Send(ctx context.Context, p Payload) error {
 
 	backoff := s.Backoff
 	var last error
+	var status int
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 {
 			if err := wait(ctx, backoff); err != nil {
-				return err
+				return status, err
 			}
 			if backoff > 0 {
 				backoff *= 2
 			}
 		}
-		err := post(ctx, client, s.URL, body, sig, p.Event, delivery, s.Header)
+		code, err := post(ctx, client, s.URL, body, sig, p.Event, delivery, s.Header)
+		if code != 0 {
+			status = code
+		}
 		if err == nil {
-			return nil
+			return status, nil
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return status, ctx.Err()
 		}
 		if !retryable(err) {
-			return err
+			return status, err
 		}
 		last = err
 	}
-	return last
+	return status, last
 }
 
 func wait(ctx context.Context, d time.Duration) error {
@@ -208,10 +214,10 @@ func wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string, extra http.Header) error {
+func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string, extra http.Header) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("webhook POST: %w", err)
+		return 0, fmt.Errorf("webhook POST: %w", withoutURL(err))
 	}
 	maps.Copy(req.Header, extra)
 	req.Header.Set("Content-Type", "application/json")
@@ -222,16 +228,27 @@ func post(ctx context.Context, client *http.Client, endpoint string, body []byte
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook POST: %w", err)
+		return 0, fmt.Errorf("webhook POST: %w", withoutURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-		return fmt.Errorf("webhook POST: %w", err)
+		return resp.StatusCode, fmt.Errorf("webhook POST: %w", err)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
+		return resp.StatusCode, nil
 	}
-	return &statusError{code: resp.StatusCode}
+	return resp.StatusCode, &statusError{code: resp.StatusCode}
+}
+
+// withoutURL drops the request URL that net/http puts in its errors. A URL
+// can carry a token in its path or query, and delivery errors reach the
+// daemon log, the run's events, and command output.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 type statusError struct {

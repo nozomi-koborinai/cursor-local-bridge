@@ -78,8 +78,12 @@ func TestSendPostsSignedPayload(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := Sender{URL: srv.URL, Secret: secret, Backoff: time.Millisecond}
-	if err := s.Send(t.Context(), payload); err != nil {
+	status, err := s.Send(t.Context(), payload)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -149,8 +153,12 @@ func TestSendExtraHeaders(t *testing.T) {
 	extra.Set(SignatureHeader, "forged")
 	extra.Set("Content-Type", "text/plain")
 	s := Sender{URL: srv.URL, Secret: secret, Header: extra, Backoff: time.Millisecond, Attempts: 2}
-	if err := s.Send(t.Context(), payload); err != nil {
+	status, err := s.Send(t.Context(), payload)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -261,8 +269,12 @@ func TestSendRetriesServerError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := Sender{URL: srv.URL, Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 4}
-	if err := s.Send(t.Context(), Payload{Event: EventStatusChange, RunID: "run-1", Status: "finished"}); err != nil {
+	status, err := s.Send(t.Context(), Payload{Event: EventStatusChange, RunID: "run-1", Status: "finished"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -283,12 +295,54 @@ func TestSendDoesNotRetryClientError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := Sender{URL: srv.URL, Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 4}
-	err := s.Send(t.Context(), Payload{Event: EventStatusChange})
+	status, err := s.Send(t.Context(), Payload{Event: EventStatusChange})
 	if err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("err = %v", err)
 	}
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d", status)
+	}
 	if got := n.Load(); got != 1 {
 		t.Fatalf("requests = %d", got)
+	}
+}
+
+func TestSendReturnsLastStatusWhenRetriesRunOut(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := Sender{URL: srv.URL, Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 3}
+	status, err := s.Send(t.Context(), Payload{Event: EventStatusChange})
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("err = %v", err)
+	}
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d", status)
+	}
+	if got := n.Load(); got != 3 {
+		t.Fatalf("requests = %d", got)
+	}
+}
+
+func TestSendStatusIsZeroWhenNoResponseArrives(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	s := Sender{URL: url + "/hooks/path-token?key=query-token", Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 2}
+	status, err := s.Send(t.Context(), Payload{Event: EventStatusChange})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if status != 0 {
+		t.Fatalf("status = %d, err = %v", status, err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "path-token") || strings.Contains(msg, "query-token") {
+		t.Fatalf("error shows the URL: %v", err)
 	}
 }
 
@@ -303,8 +357,7 @@ func TestSendStopsWhenContextCanceled(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := Sender{URL: srv.URL, Secret: []byte("k"), Backoff: 20 * time.Millisecond, Attempts: 5}
-	err := s.Send(ctx, Payload{Event: EventStatusChange})
-	if !errors.Is(err, context.Canceled) {
+	if _, err := s.Send(ctx, Payload{Event: EventStatusChange}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
 	if got := n.Load(); got != 1 {

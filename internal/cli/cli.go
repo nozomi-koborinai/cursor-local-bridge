@@ -42,11 +42,15 @@ type app struct {
 	homeErr error
 }
 
-func (a *app) config() (config.Config, error) {
+func (a *app) absHome() (string, error) {
 	if a.home == "" {
-		return config.Config{}, fmt.Errorf("find the clb home: %w; pass --home", a.homeErr)
+		return "", fmt.Errorf("find the clb home: %w; pass --home", a.homeErr)
 	}
-	home, err := filepath.Abs(a.home)
+	return filepath.Abs(a.home)
+}
+
+func (a *app) config() (config.Config, error) {
+	home, err := a.absHome()
 	if err != nil {
 		return config.Config{}, err
 	}
@@ -74,6 +78,7 @@ func newRoot(version string) *cobra.Command {
 		a.runCmd("deny", "Deny the run's oldest pending permission", ipc.MethodDeny),
 		a.listCmd(),
 		a.logsCmd(),
+		a.webhookCmd(),
 	)
 	return root
 }
@@ -114,15 +119,22 @@ func runDaemon(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	defer func() { _ = st.Close() }()
 
+	home := cfg.Home
 	d := daemon.New(daemon.Options{
 		Store: st,
 		Backends: daemon.Backends{
 			backend.ACP:   func(s backend.Sink) daemon.Session { return acp.New(cfg.AgentPath, s) },
 			backend.Print: func(s backend.Sink) daemon.Session { return stream.New(cfg.AgentPath, s, cfg.TrustWorktree) },
 		},
-		Config:  cfg,
-		Webhook: newSender(cfg.Webhook),
-		Logger:  log,
+		Config: cfg,
+		Webhook: func() (*webhook.Sender, error) {
+			loaded, err := config.Load(home)
+			if err != nil {
+				return nil, err
+			}
+			return newSender(loaded.Webhook), nil
+		},
+		Logger: log,
 	})
 	if err := d.Recover(ctx); err != nil {
 		return err

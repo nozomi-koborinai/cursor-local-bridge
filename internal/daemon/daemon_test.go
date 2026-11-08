@@ -84,6 +84,30 @@ func TestLaunchRunsToFinishedAndNotifies(t *testing.T) {
 	h.waitNDJSONMatchesLogs(run.ID)
 }
 
+func TestWebhookLoadErrorIsRecordedAndRunFinishes(t *testing.T) {
+	const msg = "webhook settings unavailable"
+	h := newHarness(t, &fakeAgent{})
+	h.stop()
+	h.webhook = func() (*webhook.Sender, error) {
+		return nil, errors.New(msg)
+	}
+	h.serve(h.newDaemon())
+
+	run := h.launch("hello")
+	h.waitStatus(run.ID, "finished")
+	events := h.waitLog(run.ID, hasType("webhook"))
+	got := dataOf(events, "webhook")
+	want := `{"status":"finished","delivered":false,"error":"` + msg + `"}`
+	if got != want {
+		t.Fatalf("webhook event = %s", got)
+	}
+	select {
+	case p := <-h.hooks.payloads:
+		t.Fatalf("webhook was sent: %+v", p)
+	default:
+	}
+}
+
 func TestPrintThinkingIsNotStored(t *testing.T) {
 	prompt := func(_ context.Context, s *fakeSession, text string) error {
 		s.sink.Event(backend.Event{
@@ -889,6 +913,7 @@ type harness struct {
 	agent    *fakeAgent
 	hooks    *hookServer
 	backends daemon.Backends
+	webhook  func() (*webhook.Sender, error)
 	stop     func()
 }
 
@@ -926,11 +951,15 @@ func newHarnessBackends(t *testing.T, agent *fakeAgent, extra daemon.Backends, e
 }
 
 func (h *harness) newDaemon() *daemon.Daemon {
+	load := h.webhook
+	if load == nil {
+		load = func() (*webhook.Sender, error) { return h.hooks.sender(), nil }
+	}
 	return daemon.New(daemon.Options{
 		Store:    h.store,
 		Backends: h.backends,
 		Config:   h.cfg,
-		Webhook:  h.hooks.sender(),
+		Webhook:  load,
 		Logger:   slog.New(slog.NewTextHandler(h.t.Output(), nil)),
 	})
 }
