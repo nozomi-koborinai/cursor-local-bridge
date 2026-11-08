@@ -40,8 +40,10 @@ type Options struct {
 	Store    *store.Store
 	Backends Backends
 	Config   config.Config
-	// Webhook delivers status notifications. Nil disables them.
-	Webhook *webhook.Sender
+	// Webhook is called once per delivery, so a config change applies without
+	// a restart. A nil func, or a nil sender with a nil error, sends nothing
+	// and records no webhook event.
+	Webhook func() (*webhook.Sender, error)
 	Logger  *slog.Logger
 }
 
@@ -49,7 +51,7 @@ type Daemon struct {
 	store    *store.Store
 	backends Backends
 	cfg      config.Config
-	webhook  *webhook.Sender
+	webhook  func() (*webhook.Sender, error)
 	log      *slog.Logger
 
 	// ctx ends when Serve returns. Run goroutines, agent sessions, and

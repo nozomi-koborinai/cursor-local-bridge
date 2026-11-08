@@ -484,7 +484,13 @@ func (a *actor) notify(run store.Run, state lifecycle.State) {
 		Error:     run.Lifecycle.Error,
 	}
 	a.d.wg.Go(func() {
-		err := a.d.webhook.Send(a.d.ctx, p)
+		sender, err := a.d.webhook()
+		if err == nil && sender == nil {
+			return
+		}
+		if err == nil {
+			_, err = sender.Send(a.d.ctx, p)
+		}
 		a.post(func() { a.delivered(p.Status, err) })
 	})
 }
