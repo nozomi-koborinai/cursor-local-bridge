@@ -333,13 +333,16 @@ func TestSendStatusIsZeroWhenNoResponseArrives(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	s := Sender{URL: url, Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 2}
+	s := Sender{URL: url + "/hooks/path-token?key=query-token", Secret: []byte("k"), Backoff: time.Millisecond, Attempts: 2}
 	status, err := s.Send(t.Context(), Payload{Event: EventStatusChange})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if status != 0 {
 		t.Fatalf("status = %d, err = %v", status, err)
+	}
+	if msg := err.Error(); strings.Contains(msg, "path-token") || strings.Contains(msg, "query-token") {
+		t.Fatalf("error shows the URL: %v", err)
 	}
 }
 

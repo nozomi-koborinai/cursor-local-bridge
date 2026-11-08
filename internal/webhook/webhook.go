@@ -15,6 +15,7 @@ import (
 	"maps"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -216,7 +217,7 @@ func wait(ctx context.Context, d time.Duration) error {
 func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string, extra http.Header) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return 0, fmt.Errorf("webhook POST: %w", err)
+		return 0, fmt.Errorf("webhook POST: %w", withoutURL(err))
 	}
 	maps.Copy(req.Header, extra)
 	req.Header.Set("Content-Type", "application/json")
@@ -227,7 +228,7 @@ func post(ctx context.Context, client *http.Client, endpoint string, body []byte
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("webhook POST: %w", err)
+		return 0, fmt.Errorf("webhook POST: %w", withoutURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
@@ -237,6 +238,17 @@ func post(ctx context.Context, client *http.Client, endpoint string, body []byte
 		return resp.StatusCode, nil
 	}
 	return resp.StatusCode, &statusError{code: resp.StatusCode}
+}
+
+// withoutURL drops the request URL that net/http puts in its errors. A URL
+// can carry a token in its path or query, and delivery errors reach the
+// daemon log, the run's events, and command output.
+func withoutURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }
 
 type statusError struct {
