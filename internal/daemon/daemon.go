@@ -273,7 +273,7 @@ func (d *Daemon) configuredModel(requested string) string {
 		return m
 	}
 	if d.cfg.Home != "" {
-		if loaded, err := config.Load(d.cfg.Home); err == nil && strings.TrimSpace(loaded.Model) != "" {
+		if loaded, err := config.Load(d.cfg.Home); err == nil {
 			return strings.TrimSpace(loaded.Model)
 		}
 	}

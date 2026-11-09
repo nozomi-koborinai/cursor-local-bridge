@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 )
 
@@ -136,6 +137,34 @@ func TestLaunchRecordsAndDisplaysRequestedModelLabel(t *testing.T) {
 		}
 		if opts := h.agent.session(0).startOptions(); opts.Model != configured {
 			t.Fatalf("start options model = %q, want %q", opts.Model, configured)
+		}
+	})
+
+	t.Run("clearing config.json model stops passing startup model", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{"selectedModel":{"modelId":"grok-4.7","parameters":[{"id":"reasoning_effort","value":"high"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, &fakeAgent{}, func(cfg *config.Config) {
+			cfg.Model = "composer-2.5"
+		})
+		if err := os.WriteFile(filepath.Join(h.cfg.Home, "config.json"), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		const want = "grok-4.7[reasoning_effort=high]"
+		run := h.launch("hi")
+		if run.Model != want {
+			t.Fatalf("launched model = %q, want %q", run.Model, want)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != want {
+			t.Fatalf("finished model = %q, want %q", done.Model, want)
+		}
+		if opts := h.agent.session(0).startOptions(); opts.Model != "" {
+			t.Fatalf("start options model = %q, want empty after clearing config.json model", opts.Model)
 		}
 	})
 
