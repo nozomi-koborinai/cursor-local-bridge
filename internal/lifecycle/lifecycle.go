@@ -104,8 +104,6 @@ type Run struct {
 	Stopped bool
 }
 
-// noReason is the error of a failure whose cause has no message, so a failed
-// run always says something.
 const noReason = "failed without an error message"
 
 type Event interface{ event() }

@@ -409,8 +409,6 @@ func TestStderrLines(t *testing.T) {
 		{
 			name: "a long line is cut on a rune boundary",
 			raw:  runeLine + "\n",
-			// 'x' plus 3000 two-byte runes. Byte 4096 is the second byte of a
-			// rune, so the first piece stops one byte earlier.
 			want: []StderrLine{
 				{Text: "x" + strings.Repeat("é", 2047)},
 				{Text: strings.Repeat("é", 953)},
@@ -428,8 +426,6 @@ func TestStderrLines(t *testing.T) {
 }
 
 func TestStderrLinesAcrossWrites(t *testing.T) {
-	// The long line is an even number of bytes, so a 4096-byte piece ends on
-	// a rune. The short writes force that cut to span Write calls.
 	raw := []byte("a\r\n" + strings.Repeat("é", 3000) + "\ntail")
 	first := strings.Repeat("é", StderrLineLimit/len("é"))
 	rest := strings.Repeat("é", 3000-StderrLineLimit/len("é"))
@@ -509,7 +505,6 @@ func collectStderr(t *testing.T, raw string) []StderrLine {
 		t.Fatal(err)
 	}
 	var got []StderrLine
-	// stdout is discarded so a large stream cannot fill the pipe and stall.
 	p, err := Start(exec.Command("sh", "-c", `cat "$1" >&2`, "sh", path), func(l StderrLine) {
 		got = append(got, l)
 	})

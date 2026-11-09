@@ -38,8 +38,7 @@ const (
 	// on. A longer line arrives in pieces cut at rune boundaries.
 	StderrLineLimit = 4 << 10
 	// StderrLogLimit is how many bytes of one process's stderr Start passes
-	// on. The run log is in SQLite, and a CLI in a debug mode can write
-	// without bound.
+	// on.
 	StderrLogLimit = 1 << 20
 )
 
@@ -73,8 +72,7 @@ type Process struct {
 
 // Start starts cmd in a new process group and adds CLB_PROC_TOKEN, with a
 // value unique to this process, to its environment. The caller may set
-// cmd.Stdin and cmd.Env but not cmd.Stdout or cmd.Stderr. Backends start
-// agent processes with backend.StartAgent, which calls Start.
+// cmd.Stdin and cmd.Env but not cmd.Stdout or cmd.Stderr.
 //
 // When onStderr is not nil, Start passes it what the process writes to
 // stderr, line by line, in order, from one goroutine at a time. A final line
@@ -306,7 +304,6 @@ func (s *stderrLog) Write(b []byte) (int, error) {
 		s.partial = nil
 		return len(b), nil
 	}
-	// A long-lived process must not pin the grown backing array.
 	rest := make([]byte, len(s.partial))
 	copy(rest, s.partial)
 	s.partial = rest
@@ -321,8 +318,6 @@ func (s *stderrLog) keep(b []byte) {
 	s.dropped += len(b) - n
 }
 
-// drain emits every complete line and every oversized piece. A trailing
-// partial line stays in partial for the next Write or for flush.
 func (s *stderrLog) drain() {
 	for !s.capped {
 		nl := bytes.IndexByte(s.partial, '\n')
@@ -346,8 +341,6 @@ func (s *stderrLog) drain() {
 	}
 }
 
-// emit passes text on, counting the raw stderr bytes it came from. When text
-// would pass StderrLogLimit, it passes the one Capped line instead and stops.
 func (s *stderrLog) emit(raw int, text []byte) {
 	if s.capped {
 		return
@@ -362,7 +355,6 @@ func (s *stderrLog) emit(raw int, text []byte) {
 	s.onLine(StderrLine{Text: string(text)})
 }
 
-// flush passes a final line that had no line ending.
 func (s *stderrLog) flush() {
 	if s.onLine == nil || s.capped || len(s.partial) == 0 {
 		return
@@ -383,8 +375,6 @@ func (s *stderrLog) contents() (string, int) {
 	return string(s.head), s.dropped
 }
 
-// cutAtRune returns the longest prefix of b, of at most limit bytes, that
-// does not end in the middle of a rune.
 func cutAtRune(b []byte, limit int) int {
 	if limit > len(b) {
 		limit = len(b)

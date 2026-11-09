@@ -93,7 +93,6 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 	if err != nil {
 		return "", err
 	}
-	// Close during the version probe aborts it and does not start the agent.
 	bound, cancel := s.bind(ctx)
 	p, err := backend.StartAgent(bound, cmd, backend.CommandACP, s.sink)
 	cancel()
@@ -336,8 +335,6 @@ func (s *Session) failure(conn *acpsdk.ClientSideConnection, op string, err erro
 	return s.explain(fmt.Errorf("agent acp %s: %w", op, err))
 }
 
-// explain attaches the agent stderr the failure path would otherwise drop
-// when the process is still alive, as on an authenticate timeout.
 func (s *Session) explain(err error) error {
 	s.mu.Lock()
 	p := s.proc

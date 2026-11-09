@@ -28,7 +28,6 @@ func ParseKind(s string) (Kind, error) {
 	return "", fmt.Errorf("unknown backend %q (want %q or %q)", s, ACP, Print)
 }
 
-// Command names what an agent CLI process does for a session.
 type Command string
 
 const (
@@ -37,7 +36,6 @@ const (
 	CommandPrint      Command = "print"       // agent -p
 )
 
-// AgentProcess describes an agent CLI process that a session started.
 type AgentProcess struct {
 	PID     int
 	Command Command

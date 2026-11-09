@@ -12,19 +12,14 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
 )
 
-// versionTimeout bounds "agent --version". Tests shorten it.
 var versionTimeout = 5 * time.Second
 
-// maxVersionLen bounds what a run record keeps of --version output.
 const maxVersionLen = 64
 
-// StartAgent is how backends start a Cursor CLI process, so every process
-// is in its run's log with its CLI version and stderr. It runs
-// cmd.Path --version with cmd.Dir and cmd.Env before every start, because
-// the CLI can update itself between any two starts, including two print-mode
-// prompts of one chat. A failed probe is reported in VersionErr and does not
-// stop the start. StartAgent returns ctx.Err() if ctx ends during the probe,
-// and does not start cmd.
+// StartAgent runs cmd.Path --version with cmd.Dir and cmd.Env before starting
+// cmd. A failed probe is reported in VersionErr and does not stop the start.
+// If ctx ends during the probe, StartAgent returns ctx.Err() and does not
+// start cmd.
 func StartAgent(ctx context.Context, cmd *exec.Cmd, command Command, sink Sink) (*proc.Process, error) {
 	version, verr := probeVersion(ctx, cmd)
 	if err := ctx.Err(); err != nil {
@@ -33,8 +28,6 @@ func StartAgent(ctx context.Context, cmd *exec.Cmd, command Command, sink Sink) 
 	if verr != nil {
 		version = ""
 	}
-	// The stderr callback can run before Start returns. It waits until the
-	// process has been reported, so AgentProcess is always first.
 	reported := make(chan struct{})
 	var pid int
 	p, err := proc.Start(cmd, func(l proc.StderrLine) {
@@ -62,8 +55,6 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// probeVersion runs cmd.Path --version under proc, so the descendants it
-// starts end with it, and returns the version it prints on stdout.
 func probeVersion(ctx context.Context, cmd *exec.Cmd) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -122,9 +113,6 @@ func probeVersion(ctx context.Context, cmd *exec.Cmd) (string, error) {
 	return parseVersion(out)
 }
 
-// parseVersion returns the first non-empty line of out, trimmed, when it is
-// 1 to maxVersionLen bytes of printable ASCII. Anything else is an error that
-// quotes at most maxVersionLen bytes.
 func parseVersion(out []byte) (string, error) {
 	for line := range bytes.SplitSeq(out, []byte{'\n'}) {
 		s := strings.TrimSpace(string(line))

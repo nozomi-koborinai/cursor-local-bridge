@@ -163,9 +163,6 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) run(ctx context.Context, cmd *exec.Cmd, command backend.Command) (*proc.Process, error) {
-	// StartAgent probes the CLI version before the process exists, so it must
-	// not run while s.mu is held. Close during the probe is checked again
-	// after it returns.
 	if s.isClosed() {
 		return nil, errClosed
 	}

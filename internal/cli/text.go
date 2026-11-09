@@ -12,7 +12,6 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 )
 
-// outputFormat is the --output flag of the commands that print runs.
 type outputFormat string
 
 const (
@@ -61,8 +60,6 @@ func writeRuns(w io.Writer, f outputFormat, runs []ipc.Run, now time.Time) error
 	return writeIndented(w, runs)
 }
 
-// runText renders r for a terminal. summary and error are indented on their
-// own lines. A failed run ends with the command that prints its stderr.
 func runText(r ipc.Run, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s  (updated %s)\n", printable(r.ID), printable(r.Status), ago(r.UpdatedAt, now))
@@ -116,9 +113,6 @@ func runText(r ipc.Run, now time.Time) string {
 	return b.String()
 }
 
-// runsTable renders runs as ID, STATUS, AGENT, UPDATED, and NOTE.
-// NOTE is the first line of error for a failed run, otherwise of summary,
-// cut to 60 runes.
 func runsTable(runs []ipc.Run, now time.Time) string {
 	type row struct {
 		id, status, agent, updated, note string
@@ -212,9 +206,6 @@ func ago(at, now time.Time) string {
 	return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
 }
 
-// printable makes text safe to write to a terminal. It keeps newlines and
-// tabs, writes other C0 controls, DEL, and C1 controls as \u00XX, and
-// replaces invalid UTF-8 with U+FFFD.
 func printable(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))

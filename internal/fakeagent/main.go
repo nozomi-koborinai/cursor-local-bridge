@@ -26,7 +26,6 @@ func main() {
 }
 
 func run(argv []string) error {
-	// Before logInvocation, so a version probe does not change invocation counts.
 	if len(argv) == 1 && argv[0] == "--version" {
 		return printVersion()
 	}
@@ -112,8 +111,6 @@ func scriptFor(prompt string) script {
 	return scriptEcho
 }
 
-// writeDiag writes three stderr lines during a turn: a short one, one longer
-// than 4 KiB, and a last one with no newline. The prompt is then echoed.
 func writeDiag(prompt string) {
 	fmt.Fprintln(os.Stderr, "diag: "+prompt)
 	fmt.Fprintln(os.Stderr, strings.Repeat("x", (4<<10)+1))
