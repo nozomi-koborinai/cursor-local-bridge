@@ -167,7 +167,7 @@ func (s *Session) run(cmd *exec.Cmd) (*proc.Process, error) {
 	if s.closed {
 		return nil, errClosed
 	}
-	p, err := proc.Start(cmd)
+	p, err := proc.Start(cmd, nil)
 	if err != nil {
 		return nil, fmt.Errorf("start agent: %w", err)
 	}

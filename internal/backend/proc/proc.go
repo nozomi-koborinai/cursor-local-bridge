@@ -33,7 +33,24 @@ const (
 	reapRounds  = 3
 	reapPoll    = 50 * time.Millisecond
 	tokenVar    = "CLB_PROC_TOKEN"
+
+	// StderrLineLimit is the longest piece of a stderr line that Start passes
+	// on. A longer line arrives in pieces cut at rune boundaries.
+	StderrLineLimit = 4 << 10
+	// StderrLogLimit is how many bytes of one process's stderr Start passes
+	// on. The run log is in SQLite, and a CLI in a debug mode can write
+	// without bound.
+	StderrLogLimit = 1 << 20
 )
+
+// StderrLine is one line, or one piece of a long line, that a process wrote
+// to stderr, without its line ending.
+type StderrLine struct {
+	Text string
+	// Capped marks the one call Start makes when the process has written more
+	// than StderrLogLimit bytes. Text is empty, and no calls follow.
+	Capped bool
+}
 
 // StderrWait is how long Wait keeps reading stderr after the process exits,
 // in case a child that outlives it still holds stderr open.
@@ -48,7 +65,7 @@ type Process struct {
 	cmd      *exec.Cmd
 	mark     string
 	family   *family
-	stderr   head
+	stderr   *stderrLog
 	done     chan struct{}
 	err      error
 	stopOnce sync.Once
@@ -56,8 +73,15 @@ type Process struct {
 
 // Start starts cmd in a new process group and adds CLB_PROC_TOKEN, with a
 // value unique to this process, to its environment. The caller may set
-// cmd.Stdin and cmd.Env but not cmd.Stdout or cmd.Stderr.
-func Start(cmd *exec.Cmd) (*Process, error) {
+// cmd.Stdin and cmd.Env but not cmd.Stdout or cmd.Stderr. Backends start
+// agent processes with backend.StartAgent, which calls Start.
+//
+// When onStderr is not nil, Start passes it what the process writes to
+// stderr, line by line, in order, from one goroutine at a time. A final line
+// with no line ending is passed after the process exits and before Done
+// closes. Wait does not return while onStderr runs, so onStderr must not
+// block on anything that waits for the process.
+func Start(cmd *exec.Cmd, onStderr func(StderrLine)) (*Process, error) {
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, err
@@ -66,10 +90,16 @@ func Start(cmd *exec.Cmd) (*Process, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Process{Stdout: r, cmd: cmd, mark: tokenVar + "=" + hex.EncodeToString(token[:]), done: make(chan struct{})}
+	p := &Process{
+		Stdout: r,
+		cmd:    cmd,
+		mark:   tokenVar + "=" + hex.EncodeToString(token[:]),
+		stderr: &stderrLog{onLine: onStderr},
+		done:   make(chan struct{}),
+	}
 	cmd.Env = append(cmd.Environ(), p.mark)
 	cmd.Stdout = w
-	cmd.Stderr = &p.stderr
+	cmd.Stderr = p.stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = StderrWait
 	err = cmd.Start()
@@ -82,10 +112,14 @@ func Start(cmd *exec.Cmd) (*Process, error) {
 	p.family = watchFamily(cmd.Process.Pid)
 	go func() {
 		p.err = cmd.Wait()
+		p.stderr.flush()
 		close(p.done)
 	}()
 	return p, nil
 }
+
+// PID is the process ID, which is also its process group ID.
+func (p *Process) PID() int { return p.cmd.Process.Pid }
 
 func (p *Process) Done() <-chan struct{} { return p.done }
 
@@ -244,24 +278,127 @@ func hasEntry(env []byte, entry string) bool {
 	return false
 }
 
-// head keeps the first stderrSize bytes written to it and counts the rest.
-type head struct {
+// stderrLog is cmd.Stderr. It keeps the first stderrSize bytes for Explain
+// and cuts everything into lines for onLine. Its only writer is exec.Cmd's
+// copying goroutine. Start calls flush after cmd.Wait returns, when that
+// goroutine has finished (Wait awaits it even after WaitDelay), so only head
+// and dropped need mu, for Explain.
+type stderrLog struct {
+	onLine func(StderrLine)
+
 	mu      sync.Mutex
-	buf     []byte
+	head    []byte
 	dropped int
+
+	partial []byte
+	passed  int
+	capped  bool
 }
 
-func (h *head) Write(b []byte) (int, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	n := min(len(b), stderrSize-len(h.buf))
-	h.buf = append(h.buf, b[:n]...)
-	h.dropped += len(b) - n
+func (s *stderrLog) Write(b []byte) (int, error) {
+	s.keep(b)
+	if s.onLine == nil || s.capped {
+		return len(b), nil
+	}
+	s.partial = append(s.partial, b...)
+	s.drain()
+	if s.capped || len(s.partial) == 0 {
+		s.partial = nil
+		return len(b), nil
+	}
+	// A long-lived process must not pin the grown backing array.
+	rest := make([]byte, len(s.partial))
+	copy(rest, s.partial)
+	s.partial = rest
 	return len(b), nil
 }
 
-func (h *head) contents() (string, int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return string(h.buf), h.dropped
+func (s *stderrLog) keep(b []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := min(len(b), stderrSize-len(s.head))
+	s.head = append(s.head, b[:n]...)
+	s.dropped += len(b) - n
+}
+
+// drain emits every complete line and every oversized piece. A trailing
+// partial line stays in partial for the next Write or for flush.
+func (s *stderrLog) drain() {
+	for !s.capped {
+		nl := bytes.IndexByte(s.partial, '\n')
+		if nl >= 0 && nl <= StderrLineLimit {
+			line := s.partial[:nl]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			raw := nl + 1
+			s.partial = s.partial[raw:]
+			s.emit(raw, line)
+			continue
+		}
+		if len(s.partial) <= StderrLineLimit {
+			return
+		}
+		cut := cutAtRune(s.partial, StderrLineLimit)
+		piece := s.partial[:cut]
+		s.partial = s.partial[cut:]
+		s.emit(cut, piece)
+	}
+}
+
+// emit passes text on, counting the raw stderr bytes it came from. When text
+// would pass StderrLogLimit, it passes the one Capped line instead and stops.
+func (s *stderrLog) emit(raw int, text []byte) {
+	if s.capped {
+		return
+	}
+	if s.passed+raw > StderrLogLimit {
+		s.capped = true
+		s.partial = nil
+		s.onLine(StderrLine{Capped: true})
+		return
+	}
+	s.passed += raw
+	s.onLine(StderrLine{Text: string(text)})
+}
+
+// flush passes a final line that had no line ending.
+func (s *stderrLog) flush() {
+	if s.onLine == nil || s.capped || len(s.partial) == 0 {
+		return
+	}
+	s.drain()
+	if s.capped || len(s.partial) == 0 {
+		s.partial = nil
+		return
+	}
+	text := s.partial
+	s.partial = nil
+	s.emit(len(text), text)
+}
+
+func (s *stderrLog) contents() (string, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.head), s.dropped
+}
+
+// cutAtRune returns the longest prefix of b, of at most limit bytes, that
+// does not end in the middle of a rune.
+func cutAtRune(b []byte, limit int) int {
+	if limit > len(b) {
+		limit = len(b)
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(b[cut]) {
+		cut--
+	}
+	if cut > 0 {
+		return cut
+	}
+	_, size := utf8.DecodeRune(b)
+	if size < 1 {
+		return 1
+	}
+	return size
 }

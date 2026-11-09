@@ -93,7 +93,7 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 	if err != nil {
 		return "", err
 	}
-	p, err := proc.Start(cmd)
+	p, err := proc.Start(cmd, nil)
 	if err != nil {
 		return "", fmt.Errorf("start agent acp: %w", err)
 	}
