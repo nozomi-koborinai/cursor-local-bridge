@@ -125,7 +125,7 @@ Grok Bot (or any assistant that can run remote shell commands and receive a webh
       - Start a run with `clb launch --repo <path> "<prompt>"`. It prints the run as JSON. Keep its "id".
       - Check a run with `clb status <id>`, and read its events with `clb logs <id>`. If a command can time out, poll `clb status` instead of `clb logs --follow`.
       - If "status" is "awaiting_permission", show me "pendingPermission". Run `clb approve <id>` or `clb deny <id>` only with my answer.
-      - Send more instructions with `clb followup <id> "<prompt>"`. End a run with `clb stop <id>`. The branch clb/<id> keeps the agent's work.
+      - Send more instructions with `clb followup <id> "<prompt>"` (this also resumes a `finished` or `failed` run on its existing worktree). End a run with `clb stop <id>`. The branch clb/<id> keeps the agent's work.
       - `clb list` prints every run. Each command prints JSON, and an error starts with "clb:".
       - Do not push, merge, or open a pull request unless I ask.
 
@@ -145,18 +145,20 @@ Grok Bot (or any assistant that can run remote shell commands and receive a webh
 | `running` | The agent is working on a prompt. |
 | `awaiting_permission` | The agent requested permission for a tool call and waits for `approve` or `deny`. |
 | `finished` | The agent ended its turn with no queued prompts. The agent process closes; a follow-up starts a new one. |
-| `failed` | The agent process or worktree cleanup failed (`error` says why). The worktree stays until `clb stop` succeeds. |
+| `failed` | The agent process, stall watchdog, or worktree cleanup failed (`error` says why). A follow-up resumes the run on the same worktree, or `clb stop` cleans it up. |
 | `stopped` | You stopped the run. Its worktree is removed, and its changes are on the run's branch. |
 
 | Command | Allowed in | Effect |
 | --- | --- | --- |
 | `launch` | | Creates a run in `queued`. |
 | `followup` | `queued`, `running`, `awaiting_permission` | Queues the prompt for when the current turn ends. |
-| `followup` | `finished` | Resumes the session in a new agent process and moves the run to `queued`. |
+| `followup` | `finished`, `failed` | Resumes an unstopped run in a new agent process on the same worktree (reloading `sessionId` when set, or starting a new session if the first start failed) and moves the run to `queued`. |
 | `approve`, `deny` | `awaiting_permission` | Answers the oldest pending permission request. |
 | `stop` | any | Stops the agent, commits uncommitted changes (including untracked files, excluding ignored files, skipping hooks and signing, falling back to author `clb <clb@localhost>`) to the run's branch, removes the worktree, and moves the run to `stopped`. If cleanup fails, the worktree stays and the run moves to `failed` (`error` starts with `remove worktree: `). Stopping a `failed` run retries cleanup while keeping `failed`. |
 
 A command in a disallowed state fails with a `conflict` error. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
+
+When `stallTimeout` is set in `config.json` (for example `"10m"`), the daemon watches each `queued` or `running` run for inactivity. Any streamed event from the agent (including thought chunks and command updates that are not stored by default) resets the timer, and waiting in `awaiting_permission` pauses it until all pending permission requests are answered. If the timeout elapses with no agent activity, the daemon closes the agent process, marks the run `failed` with `error` set to `run stalled: no agent activity for <duration>`, and fires the signed `failed` webhook. Run `clb followup <id> "<prompt>"` to resume or retry on the same worktree, or `clb stop <id>` to commit uncommitted work and remove the worktree.
 
 When an agent process closes—or when the daemon restarts and marks previously active runs `failed`—the daemon ends any background processes the agent left behind (SIGTERM, then SIGKILL after 1s). It matches processes by an inherited `CLB_PROC_TOKEN` variable, a macOS process-tree watch, and any of your processes whose working directory is inside the run's worktree (including a shell you opened there).
 
@@ -336,6 +338,8 @@ When you load a file that has both and they differ, the bearer key replaces the 
 | `worktreeDir` | `<home>/worktrees` | Directory for run worktrees. |
 | `storeAllEvents` | `false` | Also store `agent_thought_chunk`, `available_commands_update`, and `thinking` events. |
 | `trustWorktree` | `false` | Pass `--trust` to `agent -p` (required for the `print` backend; see [Backends](#backends)). |
+| `stallTimeout` | `0` (disabled) | Go duration string (for example `"10m"`). Fails a `queued` or `running` run that receives no agent event within this duration; paused while `awaiting_permission`. |
+| `keepAwake` | `false` | On macOS, run `/usr/bin/caffeinate -i -w <daemon pid>` while at least one run is active so the Mac does not idle-sleep mid-run. No-op on Linux. |
 | `webhook.url` | empty | Endpoint for run webhooks. |
 | `webhook.secret` | empty | Single webhook secret sent as `Authorization: Bearer <secret>` and used as the HMAC signing key for `X-Clb-Signature` (required when `webhook.url` is set; always masked as `********` when displayed). |
 | `webhook.headers` | empty | Extra HTTP headers sent on every delivery. A legacy `Authorization: Bearer <key>` value is read into `webhook.secret`. Any other `Authorization` value is sent as-is and overrides the bearer token. The next `clb webhook setup` removes `Authorization` from this object. |

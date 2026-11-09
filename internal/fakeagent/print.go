@@ -99,6 +99,8 @@ func runPrint(o printOptions, prompt string) error {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+	case scriptStall:
+		time.Sleep(2 * time.Minute)
 	default:
 		reply = "echo: " + prompt
 		if err := assistant(reply); err != nil {

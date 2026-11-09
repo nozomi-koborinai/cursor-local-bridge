@@ -124,6 +124,8 @@ type actor struct {
 	// closing is the last closed generation. Its agent may still be
 	// shutting down.
 	closing     *generation
+	state       lifecycle.State
+	stall       *time.Timer
 	perms       int
 	permRetries map[string]int
 	carried     []store.NewEvent
@@ -143,6 +145,7 @@ type generation struct {
 }
 
 func (a *actor) loop() {
+	defer a.stopStall()
 	for {
 		select {
 		case f := <-a.inbox:
@@ -219,9 +222,13 @@ func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
 	if err := a.d.store.CreateRun(a.d.writes, run); err != nil {
 		return err
 	}
+	a.state = run.Lifecycle.State
+	a.d.setRunActive(a.id, run.Lifecycle.State.Active())
 	a.appendEvent(eventStatus, statusData{Status: run.Lifecycle.State})
 	a.d.log.Info("run launched", "run", run.ID, "repo", run.Repo, "backend", run.Backend)
-	return a.perform(run, effects)
+	err := a.perform(run, effects)
+	a.syncStall(true)
+	return err
 }
 
 func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
@@ -241,6 +248,7 @@ func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run))
 	}
 	a.rememberRetries(next)
 	changed := next.State != prev.State
+	a.state = next.State
 	run.Lifecycle = next
 	if edit != nil {
 		edit(&run)
@@ -251,6 +259,7 @@ func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run))
 		return run, err
 	}
 	if next.State == lifecycle.Stopping {
+		a.stopStall()
 		a.carried = append(a.carried, events...)
 		return run, a.perform(run, effects)
 	}
@@ -261,13 +270,16 @@ func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run))
 	if err != nil {
 		return run, err
 	}
+	a.d.setRunActive(a.id, next.State.Active())
 	for _, ev := range appended {
 		a.appendNDJSON(ev)
 	}
 	if changed {
 		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
 	}
-	return run, a.perform(run, effects)
+	err = a.perform(run, effects)
+	a.syncStall(changed || len(effects) > 0)
+	return run, err
 }
 
 func (a *actor) hydrateRetries(r *lifecycle.Run) {
@@ -484,6 +496,9 @@ func (a *actor) promptDone(g *generation, err error) {
 }
 
 func (a *actor) agentEvent(g *generation, e backend.Event) {
+	if a.state == lifecycle.Queued || a.state == lifecycle.Running {
+		a.resetStall(g)
+	}
 	if e.Type == backend.EventTransportError {
 		g.retries++
 	}
@@ -491,6 +506,42 @@ func (a *actor) agentEvent(g *generation, e backend.Event) {
 		a.appendEvent(e.Type, e.Data)
 	}
 	g.turn.add(e)
+}
+
+func (a *actor) syncStall(reset bool) {
+	switch a.state {
+	case lifecycle.Queued, lifecycle.Running:
+		if reset && a.gen != nil {
+			a.resetStall(a.gen)
+		}
+	default:
+		a.stopStall()
+	}
+}
+
+func (a *actor) resetStall(g *generation) {
+	a.stopStall()
+	d := a.d.cfg.StallTimeout.Duration()
+	if d <= 0 || g == nil {
+		return
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(d, func() {
+		a.postFrom(g, func() {
+			if a.stall != timer {
+				return
+			}
+			a.fail(fmt.Errorf("run stalled: no agent activity for %s", d))
+		})
+	})
+	a.stall = timer
+}
+
+func (a *actor) stopStall() {
+	if a.stall != nil {
+		a.stall.Stop()
+		a.stall = nil
+	}
 }
 
 type turnSummary struct {
@@ -596,6 +647,7 @@ func (a *actor) cancelPermission(eff lifecycle.CancelPermission) {
 }
 
 func (a *actor) closeBackend() {
+	a.stopStall()
 	if a.gen != nil {
 		a.stopReminders(a.gen)
 		a.gen.cancel()
@@ -644,7 +696,6 @@ func (a *actor) awaitClosed() {
 	case <-g.closed:
 	case <-timer.C:
 		a.d.log.Warn("agent session still closing; continuing", "run", a.id)
-	case <-a.d.ctx.Done():
 	}
 }
 
