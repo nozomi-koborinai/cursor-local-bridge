@@ -21,7 +21,7 @@ func TestStopEndsWhatNodeSpawned(t *testing.T) {
 	script := `const c = require("child_process").spawn("/bin/sleep", ["120"], {detached: true, stdio: "ignore", env: {}});
 console.log(c.pid);
 c.unref();`
-	p, err := Start(exec.Command(node, "-e", script))
+	p, err := Start(exec.Command(node, "-e", script), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

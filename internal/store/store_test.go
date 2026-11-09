@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -20,15 +21,16 @@ func TestRunRoundTrip(t *testing.T) {
 	updated := created.Add(time.Minute)
 	tool := json.RawMessage(`{"name":"shell","input":{"cmd":"ls \"x\""}}`)
 	in := Run{
-		ID:        "run-1",
-		Repo:      "/repo",
-		BaseRef:   "abc123",
-		Branch:    "clb/run-1",
-		Worktree:  "/wt/run-1",
-		Backend:   backend.ACP,
-		Model:     "composer",
-		SessionID: "sess-1",
-		Summary:   "did the thing",
+		ID:           "run-1",
+		Repo:         "/repo",
+		BaseRef:      "abc123",
+		Branch:       "clb/run-1",
+		Worktree:     "/wt/run-1",
+		Backend:      backend.ACP,
+		Model:        "composer",
+		SessionID:    "sess-1",
+		AgentVersion: "2026.01.01-fake",
+		Summary:      "did the thing",
 		Lifecycle: lifecycle.Run{
 			State:   lifecycle.AwaitingPermission,
 			Prompts: []string{`say "hi"`, "次"},
@@ -62,6 +64,7 @@ func TestRunRoundTrip(t *testing.T) {
 	in.Backend = backend.Print
 	in.Model = "other"
 	in.SessionID = "sess-2"
+	in.AgentVersion = "2026.01.08-abcdef0"
 	in.Summary = "next"
 	in.Lifecycle = lifecycle.Run{State: lifecycle.Failed, Error: "later", Stopped: true}
 	in.CreatedAt = updated.Add(2 * time.Hour)
@@ -100,6 +103,66 @@ func TestRunRoundTrip(t *testing.T) {
 	}
 	if prompts != "[]" || permissions != "[]" {
 		t.Fatalf("stored slices prompts=%s permissions=%s", prompts, permissions)
+	}
+}
+
+func TestMigrationAddsAgentVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clb.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFS.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	const id = "run-old"
+	_, err = db.Exec(`
+		INSERT INTO runs (
+			id, repo, base_ref, branch, worktree, backend, model, session_id,
+			state, prompts, permissions, error, summary, created_at, updated_at
+		) VALUES (?, '/repo', 'main', 'clb/run-old', '/wt', 'acp', '', 'sess', 'finished', '[]', '[]', '', 'done', ?, ?)`,
+		id, "2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got, err := s.GetRun(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentVersion != "" || got.Summary != "done" || got.Lifecycle.State != lifecycle.Finished {
+		t.Fatalf("upgraded run = %+v, want an empty agent version", got)
+	}
+	got.AgentVersion = "2026.01.01-fake"
+	if _, err := s.UpdateRun(t.Context(), got); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetRun(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentVersion != "2026.01.01-fake" {
+		t.Fatalf("agent version = %q", got.AgentVersion)
+	}
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("user_version = %d, %v", version, err)
 	}
 }
 
@@ -175,7 +238,7 @@ func TestEventsSeqFilterAndReopen(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
+	if version != 3 {
 		t.Fatalf("user_version = %d", version)
 	}
 	got, err = s.Events(ctx, "run-a", 0)

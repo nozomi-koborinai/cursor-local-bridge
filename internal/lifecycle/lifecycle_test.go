@@ -508,6 +508,62 @@ func TestPermissionSupersedeAndCancel(t *testing.T) {
 	})
 }
 
+func TestErrorNonEmptyExactlyWhenFailed(t *testing.T) {
+	r, _ := Launch("p1")
+	events := []Event{
+		Started{},
+		PermissionRequested{Permission: Permission{ID: "1"}},
+		PermissionAnswered{Approve: true},
+		TurnEnded{},
+		FollowUp{Prompt: "p2"},
+		Started{},
+		Stop{},
+		WorktreeRemoved{},
+	}
+	for i, e := range events {
+		var err error
+		r, _, err = Apply(r, e)
+		if err != nil {
+			t.Fatalf("event %d (%T): %v", i, e, err)
+		}
+		if failed := r.State == Failed; failed != (r.Error != "") {
+			t.Fatalf("event %d (%T): state %s error %q", i, e, r.State, r.Error)
+		}
+	}
+	if r.State != Stopped || r.Error != "" {
+		t.Fatalf("after stop = %+v, want stopped with an empty error", r)
+	}
+	late, _, err := Apply(r, BackendFailed{Err: "late"})
+	if err != nil || late.State != Stopped || late.Error != "" {
+		t.Fatalf("failure after stop = %+v, %v", late, err)
+	}
+
+	for _, from := range []Run{
+		{State: Queued, Prompts: []string{"p"}},
+		{State: Running},
+		{State: AwaitingPermission, Permissions: []Permission{{ID: "1"}}},
+	} {
+		for _, cause := range []string{"", " \n\t"} {
+			got, _, err := Apply(from, BackendFailed{Err: cause})
+			if err != nil || got.State != Failed || got.Error != "failed without an error message" {
+				t.Fatalf("BackendFailed %q from %s = %+v, %v", cause, from.State, got, err)
+			}
+		}
+	}
+	got, _, err := Apply(Run{State: Stopping}, WorktreeRemoveFailed{})
+	if err != nil || got.State != Failed || got.Error != "failed without an error message" {
+		t.Fatalf("empty removal failure = %+v, %v", got, err)
+	}
+	got, _, err = Apply(Run{State: Running}, BackendFailed{Err: "boom"})
+	if err != nil || got.Error != "boom" {
+		t.Fatalf("message = %+v, %v", got, err)
+	}
+	got, _, err = Apply(Run{State: Running}, Stop{})
+	if err != nil || got.State != Stopping || got.Error != "" {
+		t.Fatalf("stop = %+v, %v", got, err)
+	}
+}
+
 func TestParseState(t *testing.T) {
 	for _, s := range []string{"queued", "running", "awaiting_permission", "finished", "failed", "stopping", "stopped"} {
 		if got, err := ParseState(s); err != nil || string(got) != s {

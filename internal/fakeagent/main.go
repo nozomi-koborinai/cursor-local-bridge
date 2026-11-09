@@ -9,10 +9,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,6 +26,9 @@ func main() {
 }
 
 func run(argv []string) error {
+	if len(argv) == 1 && argv[0] == "--version" {
+		return printVersion()
+	}
 	if err := logInvocation(argv); err != nil {
 		return err
 	}
@@ -52,6 +57,24 @@ func run(argv []string) error {
 
 func loggedOut() bool { return os.Getenv("FAKEAGENT_LOGGED_OUT") == "1" }
 
+func printVersion() error {
+	if os.Getenv("FAKEAGENT_NO_VERSION") == "1" {
+		return errors.New("unknown option '--version'")
+	}
+	text := "2026.01.01-fake"
+	if dir := os.Getenv("FAKEAGENT_STATE_DIR"); dir != "" {
+		b, err := os.ReadFile(filepath.Join(dir, "version"))
+		if err == nil {
+			line, _, _ := bytes.Cut(b, []byte{'\n'})
+			if s := strings.TrimSpace(string(line)); s != "" {
+				text = s
+			}
+		}
+	}
+	fmt.Println(text)
+	return nil
+}
+
 type script int
 
 const (
@@ -63,6 +86,7 @@ const (
 	scriptCrash
 	scriptBackground
 	scriptTransport
+	scriptStderr
 )
 
 func scriptFor(prompt string) script {
@@ -81,8 +105,16 @@ func scriptFor(prompt string) script {
 		return scriptBackground
 	case strings.Contains(prompt, "[transport]"):
 		return scriptTransport
+	case strings.Contains(prompt, "[stderr]"):
+		return scriptStderr
 	}
 	return scriptEcho
+}
+
+func writeDiag(prompt string) {
+	fmt.Fprintln(os.Stderr, "diag: "+prompt)
+	fmt.Fprintln(os.Stderr, strings.Repeat("x", (4<<10)+1))
+	fmt.Fprint(os.Stderr, "diag: tail")
 }
 
 func crash() {

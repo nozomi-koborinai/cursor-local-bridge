@@ -79,6 +79,7 @@ type Run struct {
 	Backend            string       `json:"backend"`
 	Model              string       `json:"model,omitempty"`
 	SessionID          string       `json:"sessionId,omitempty"`
+	AgentVersion       string       `json:"agentVersion,omitempty"`
 	Summary            string       `json:"summary,omitempty"`
 	Error              string       `json:"error,omitempty"`
 	QueuedPrompts      int          `json:"queuedPrompts"`

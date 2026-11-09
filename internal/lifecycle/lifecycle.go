@@ -97,11 +97,14 @@ type Run struct {
 	// Permissions holds unanswered permission requests, oldest first. It is
 	// non-empty exactly when State is AwaitingPermission.
 	Permissions []Permission
-	Error       string
+	// Error is non-empty exactly when State is Failed.
+	Error string
 	// Stopped reports that Stop has been run on a failed run, so FollowUp
 	// cannot resume it even though State stays Failed.
 	Stopped bool
 }
+
+const noReason = "failed without an error message"
 
 type Event interface{ event() }
 
@@ -310,7 +313,7 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 			return r, nil, nil
 		}
 		cancels := cancelAll(r.Permissions, CancelRunEnded)
-		return Run{State: Failed, Error: e.Err}, append(cancels, CloseBackend{}, Notify{State: Failed}), nil
+		return Run{State: Failed, Error: reason(e.Err)}, append(cancels, CloseBackend{}, Notify{State: Failed}), nil
 
 	case WorktreeRemoved:
 		if r.State == Failed {
@@ -326,7 +329,7 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		if r.State != Stopping {
 			return r, nil, nil
 		}
-		return Run{State: Failed, Error: e.Err, Stopped: true}, []Effect{Notify{State: Failed}}, nil
+		return Run{State: Failed, Error: reason(e.Err), Stopped: true}, []Effect{Notify{State: Failed}}, nil
 	}
 	panic(fmt.Sprintf("lifecycle: unhandled event %T", e))
 }
@@ -497,6 +500,13 @@ func resolvePermissionAnswer(p Permission, approve bool, rawOption string) (Answ
 		}
 	}
 	return AnswerPermission{}, fmt.Errorf("%w: permission %q does not offer option %q", ErrNotAllowed, p.ID, rawOption)
+}
+
+func reason(err string) string {
+	if strings.TrimSpace(err) == "" {
+		return noReason
+	}
+	return err
 }
 
 func notAllowed(action string, s State) error {

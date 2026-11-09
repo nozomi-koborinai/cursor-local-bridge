@@ -93,8 +93,11 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 	if err != nil {
 		return "", err
 	}
-	p, err := proc.Start(cmd)
+	bound, cancel := s.bind(ctx)
+	p, err := backend.StartAgent(bound, cmd, backend.CommandACP, s.sink)
+	cancel()
 	if err != nil {
+		_ = stdin.Close()
 		return "", fmt.Errorf("start agent acp: %w", err)
 	}
 	conn := acpsdk.NewClientSideConnection(client{s}, stdin, p.Stdout)
@@ -119,7 +122,7 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 		s.end(exited{p: p, status: err})
 	}()
 
-	ctx, cancel := s.bind(ctx)
+	ctx, cancel = s.bind(ctx)
 	defer cancel()
 
 	init, err := conn.Initialize(ctx, acpsdk.InitializeRequest{
@@ -217,7 +220,7 @@ func (s *Session) authenticate(ctx context.Context, conn *acpsdk.ClientSideConne
 		return nil
 	}
 	if errors.Is(context.Cause(ctx), errAuthTimeout) {
-		return fmt.Errorf("agent acp did not answer authenticate within %s; run 'agent login' and try again", authTimeout)
+		return s.explain(fmt.Errorf("agent acp did not answer authenticate within %s; run 'agent login' and try again", authTimeout))
 	}
 	return s.failure(conn, "authenticate", err)
 }
@@ -323,13 +326,23 @@ func (s *Session) failure(conn *acpsdk.ClientSideConnection, op string, err erro
 		return exit.p.Explain(fmt.Errorf("%w before it answered %s", exit, op))
 	}
 	if cause != nil {
-		return fmt.Errorf("%s: %w", op, cause)
+		return s.explain(fmt.Errorf("%s: %w", op, cause))
 	}
 	var reqErr *acpsdk.RequestError
 	if errors.As(err, &reqErr) && reqErr.Code == authRequiredCode {
-		return fmt.Errorf("agent acp %s: %w; run 'agent login' and try again", op, err)
+		return s.explain(fmt.Errorf("agent acp %s: %w; run 'agent login' and try again", op, err))
 	}
-	return fmt.Errorf("agent acp %s: %w", op, err)
+	return s.explain(fmt.Errorf("agent acp %s: %w", op, err))
+}
+
+func (s *Session) explain(err error) error {
+	s.mu.Lock()
+	p := s.proc
+	s.mu.Unlock()
+	if p == nil {
+		return err
+	}
+	return p.Explain(err)
 }
 
 // exited ends a session whose agent process exited on its own.

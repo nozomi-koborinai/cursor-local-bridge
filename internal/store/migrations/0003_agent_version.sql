@@ -1,0 +1,1 @@
+ALTER TABLE runs ADD COLUMN agent_version TEXT NOT NULL DEFAULT '';

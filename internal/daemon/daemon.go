@@ -417,6 +417,7 @@ func toIPCRun(r store.Run) ipc.Run {
 		Backend:       string(r.Backend),
 		Model:         model,
 		SessionID:     r.SessionID,
+		AgentVersion:  r.AgentVersion,
 		Summary:       r.Summary,
 		Error:         r.Lifecycle.Error,
 		QueuedPrompts: len(r.Lifecycle.Prompts),

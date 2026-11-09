@@ -181,16 +181,17 @@ func (a *app) launchCmd() *cobra.Command {
 		Short: "Start a run on a new branch and worktree of a repository",
 		Long:  "Start a run on a new branch and worktree of a repository. A PROMPT of - reads the prompt from stdin.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var err error
-			if req.Prompt, err = promptArg(cmd, args[0]); err != nil {
-				return err
-			}
-			if req.Repo, err = filepath.Abs(repo); err != nil {
-				return err
-			}
-			return a.printRun(cmd, req)
-		},
+	}
+	format := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		var err error
+		if req.Prompt, err = promptArg(cmd, args[0]); err != nil {
+			return err
+		}
+		if req.Repo, err = filepath.Abs(repo); err != nil {
+			return err
+		}
+		return a.printRun(cmd, req, *format)
 	}
 	cmd.Flags().StringVar(&repo, "repo", ".", "repository to work in")
 	cmd.Flags().StringVar(&req.Ref, "ref", "", "commit, branch, or tag to start the run's branch from (default HEAD)")
@@ -200,30 +201,34 @@ func (a *app) launchCmd() *cobra.Command {
 }
 
 func (a *app) followUpCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "followup ID PROMPT",
 		Short: "Send a follow-up prompt, queued behind the turn in flight or resuming a finished or failed run",
 		Long:  "Send a follow-up prompt, queued behind the turn in flight or resuming a finished or failed run. A PROMPT of - reads the prompt from stdin.",
 		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt, err := promptArg(cmd, args[1])
-			if err != nil {
-				return err
-			}
-			return a.printRun(cmd, ipc.Request{Method: ipc.MethodFollowUp, RunID: args[0], Prompt: prompt})
-		},
 	}
+	format := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		prompt, err := promptArg(cmd, args[1])
+		if err != nil {
+			return err
+		}
+		return a.printRun(cmd, ipc.Request{Method: ipc.MethodFollowUp, RunID: args[0], Prompt: prompt}, *format)
+	}
+	return cmd
 }
 
 func (a *app) runCmd(name, short string, method ipc.Method) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   name + " ID",
 		Short: short,
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.printRun(cmd, ipc.Request{Method: method, RunID: args[0]})
-		},
 	}
+	format := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return a.printRun(cmd, ipc.Request{Method: method, RunID: args[0]}, *format)
+	}
+	return cmd
 }
 
 func (a *app) permissionAnswerCmd(name, short string, method ipc.Method) *cobra.Command {
@@ -270,7 +275,7 @@ func (a *app) permissionAnswerCmd(name, short string, method ipc.Method) *cobra.
 				PermissionIDs: ids,
 				All:           all,
 				Option:        option,
-			})
+			}, outputJSON)
 		},
 	}
 	cmd.Flags().StringSliceVarP(&permissionIDs, "permission", "p", nil, "pending permission id to answer (default oldest)")
@@ -313,26 +318,29 @@ func (a *app) printPermissions(cmd *cobra.Command, runID string) error {
 }
 
 func (a *app) listCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "Print every run, newest first",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			runs := []ipc.Run{}
-			err := a.call(cmd, ipc.Request{Method: ipc.MethodList}, func(r ipc.Response) error {
-				runs = append(runs, r.Runs...)
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-			return writeIndented(cmd.OutOrStdout(), runs)
-		},
 	}
+	format := addOutputFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		runs := []ipc.Run{}
+		err := a.call(cmd, ipc.Request{Method: ipc.MethodList}, func(r ipc.Response) error {
+			runs = append(runs, r.Runs...)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		return writeRuns(cmd.OutOrStdout(), *format, runs, time.Now())
+	}
+	return cmd
 }
 
 func (a *app) logsCmd() *cobra.Command {
 	var follow bool
+	var types []string
 	cmd := &cobra.Command{
 		Use:   "logs ID",
 		Short: "Print a run's events, one JSON object per line",
@@ -341,7 +349,7 @@ func (a *app) logsCmd() *cobra.Command {
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			req := ipc.Request{Method: ipc.MethodLogs, RunID: args[0], Follow: follow}
 			return a.call(cmd, req, func(r ipc.Response) error {
-				if r.Event == nil {
+				if r.Event == nil || !eventWanted(types, r.Event.Type) {
 					return nil
 				}
 				return enc.Encode(r.Event)
@@ -349,6 +357,7 @@ func (a *app) logsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new events until the run is no longer active")
+	cmd.Flags().StringArrayVar(&types, "type", nil, "print only events of this type (repeatable)")
 	return cmd
 }
 
@@ -360,7 +369,7 @@ func (a *app) call(cmd *cobra.Command, req ipc.Request, fn func(ipc.Response) er
 	return ipc.Call(cmd.Context(), cfg.SocketPath, req, fn)
 }
 
-func (a *app) printRun(cmd *cobra.Command, req ipc.Request) error {
+func (a *app) printRun(cmd *cobra.Command, req ipc.Request, format outputFormat) error {
 	var run *ipc.Run
 	err := a.call(cmd, req, func(r ipc.Response) error {
 		run = r.Run
@@ -372,7 +381,7 @@ func (a *app) printRun(cmd *cobra.Command, req ipc.Request) error {
 	if run == nil {
 		return errors.New("the daemon replied without a run")
 	}
-	return writeIndented(cmd.OutOrStdout(), run)
+	return writeRun(cmd.OutOrStdout(), format, *run, time.Now())
 }
 
 func promptArg(cmd *cobra.Command, arg string) (string, error) {

@@ -257,7 +257,7 @@ func startDetaching(t *testing.T, dir, how string) (*Process, int) {
 	cmd := exec.Command(self, "-test.run=^$")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PROC_TEST_DETACH="+how)
-	p, err := Start(cmd)
+	p, err := Start(cmd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func startDetaching(t *testing.T, dir, how string) (*Process, int) {
 }
 
 func TestStopEndsChildrenThatIgnoreSIGTERM(t *testing.T) {
-	p, err := Start(exec.Command("sh", "-c", `(trap "" TERM; exec sleep 60) & echo $!; wait`))
+	p, err := Start(exec.Command("sh", "-c", `(trap "" TERM; exec sleep 60) & echo $!; wait`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestStopEndsChildrenThatIgnoreSIGTERM(t *testing.T) {
 }
 
 func TestOutputBeforeExitIsKept(t *testing.T) {
-	p, err := Start(exec.Command("sh", "-c", `echo last words; echo oops >&2; exit 3`))
+	p, err := Start(exec.Command("sh", "-c", `echo last words; echo oops >&2; exit 3`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestExplainShowsTheStartOfStderr(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := exec.Command("sh", "-c", `printf '%s' "$STDERR" >&2`)
 			cmd.Env = append(os.Environ(), "STDERR="+tt.stderr)
-			p, err := Start(cmd)
+			p, err := Start(cmd, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -372,6 +372,185 @@ func TestExplainShowsTheStartOfStderr(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStderrLines(t *testing.T) {
+	long := strings.Repeat("a", 10<<10)
+	runeLine := "x" + strings.Repeat("é", 3000)
+	tests := []struct {
+		name string
+		raw  string
+		want []StderrLine
+	}{
+		{
+			name: "lines split on lf",
+			raw:  "a\nb\n",
+			want: []StderrLine{{Text: "a"}, {Text: "b"}},
+		},
+		{
+			name: "crlf is one line ending",
+			raw:  "a\r\nb\r\n",
+			want: []StderrLine{{Text: "a"}, {Text: "b"}},
+		},
+		{
+			name: "unterminated line is flushed before Done",
+			raw:  "tail",
+			want: []StderrLine{{Text: "tail"}},
+		},
+		{
+			name: "a long line is cut at the limit",
+			raw:  long + "\n",
+			want: []StderrLine{
+				{Text: long[:StderrLineLimit]},
+				{Text: long[StderrLineLimit : 2*StderrLineLimit]},
+				{Text: long[2*StderrLineLimit:]},
+			},
+		},
+		{
+			name: "a long line is cut on a rune boundary",
+			raw:  runeLine + "\n",
+			want: []StderrLine{
+				{Text: "x" + strings.Repeat("é", 2047)},
+				{Text: strings.Repeat("é", 953)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := collectStderr(t, tt.raw)
+			if !reflectDeepEqualLines(got, tt.want) {
+				t.Fatalf("lines = %s, want %s", quoteLines(got), quoteLines(tt.want))
+			}
+		})
+	}
+}
+
+func TestStderrLinesAcrossWrites(t *testing.T) {
+	raw := []byte("a\r\n" + strings.Repeat("é", 3000) + "\ntail")
+	first := strings.Repeat("é", StderrLineLimit/len("é"))
+	rest := strings.Repeat("é", 3000-StderrLineLimit/len("é"))
+	want := []StderrLine{{Text: "a"}, {Text: first}, {Text: rest}, {Text: "tail"}}
+	for _, size := range []int{1, 3, 4095, len(raw)} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			var got []StderrLine
+			log := &stderrLog{onLine: func(l StderrLine) { got = append(got, l) }}
+			for i := 0; i < len(raw); i += size {
+				end := min(i+size, len(raw))
+				if _, err := log.Write(raw[i:end]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log.flush()
+			if !reflectDeepEqualLines(got, want) {
+				t.Fatalf("lines = %s, want %s", quoteLines(got), quoteLines(want))
+			}
+		})
+	}
+}
+
+func TestStderrCapStopsTheLog(t *testing.T) {
+	const extra = 100
+	got := collectStderr(t, strings.Repeat("z", StderrLogLimit+extra))
+	var text int
+	var capped int
+	for i, line := range got {
+		if line.Capped {
+			capped++
+			if line.Text != "" {
+				t.Errorf("capped line %d has text %q", i, line.Text)
+			}
+			if i != len(got)-1 {
+				t.Errorf("capped line at %d of %d", i, len(got))
+			}
+			continue
+		}
+		if capped > 0 {
+			t.Errorf("line %d arrived after the cap", i)
+		}
+		text += len(line.Text)
+	}
+	if capped != 1 {
+		t.Fatalf("capped markers = %d, lines = %d", capped, len(got))
+	}
+	if text != StderrLogLimit {
+		t.Errorf("logged %d bytes, want %d", text, StderrLogLimit)
+	}
+}
+
+func TestExplainUnchangedWhenLinesAreForwarded(t *testing.T) {
+	a512 := strings.Repeat("a", 512)
+	stderr := a512 + "\n"
+	cmd := exec.Command("sh", "-c", `printf '%s' "$STDERR" >&2`)
+	cmd.Env = append(os.Environ(), "STDERR="+stderr)
+	var got []StderrLine
+	p, err := Start(cmd, func(l StderrLine) { got = append(got, l) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p.Wait()
+	_ = p.Stdout.Close()
+	want := "failed; stderr: " + a512
+	if msg := p.Explain(errors.New("failed")).Error(); msg != want {
+		t.Errorf("Explain = %s, want %s", brief(msg), brief(want))
+	}
+	if len(got) != 1 || got[0].Text != a512 || got[0].Capped {
+		t.Errorf("lines = %#v, want the trimmed line", got)
+	}
+}
+
+func collectStderr(t *testing.T, raw string) []StderrLine {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stderr.bin")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []StderrLine
+	p, err := Start(exec.Command("sh", "-c", `cat "$1" >&2`, "sh", path), func(l StderrLine) {
+		got = append(got, l)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, p.Stdout)
+		_ = p.Stdout.Close()
+		read <- err
+	}()
+	if err := p.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-read; err != nil {
+		t.Fatal(err)
+	}
+	if p.PID() <= 0 {
+		t.Errorf("PID = %d", p.PID())
+	}
+	return got
+}
+
+func reflectDeepEqualLines(got, want []StderrLine) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func quoteLines(lines []StderrLine) string {
+	parts := make([]string, len(lines))
+	for i, l := range lines {
+		if l.Capped {
+			parts[i] = "capped"
+			continue
+		}
+		parts[i] = brief(l.Text)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func brief(s string) string {

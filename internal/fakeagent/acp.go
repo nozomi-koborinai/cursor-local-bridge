@@ -64,6 +64,7 @@ func (a *fakeACP) Authenticate(ctx context.Context, req acp.AuthenticateRequest)
 	}
 	if loggedOut() {
 		// The real CLI never answers authenticate when it has no credentials.
+		fmt.Fprintln(os.Stderr, "Error: not logged in")
 		<-ctx.Done()
 		return acp.AuthenticateResponse{}, ctx.Err()
 	}
@@ -197,6 +198,9 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		err   error
 	)
 	switch scriptFor(prompt.String()) {
+	case scriptStderr:
+		writeDiag(prompt.String())
+		reply, err = a.echo(ctx, req.SessionId, prompt.String())
 	case scriptCrash:
 		_ = a.update(ctx, req.SessionId, acp.UpdateAgentMessageText("about to crash"))
 		crash()
