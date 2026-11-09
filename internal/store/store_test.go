@@ -63,7 +63,7 @@ func TestRunRoundTrip(t *testing.T) {
 	in.Model = "other"
 	in.SessionID = "sess-2"
 	in.Summary = "next"
-	in.Lifecycle = lifecycle.Run{State: lifecycle.Running, Error: "later"}
+	in.Lifecycle = lifecycle.Run{State: lifecycle.Failed, Error: "later", Stopped: true}
 	in.CreatedAt = updated.Add(2 * time.Hour)
 	in.UpdatedAt = updated.Add(time.Hour)
 	if _, err := s.UpdateRun(ctx, in); err != nil {
@@ -175,7 +175,7 @@ func TestEventsSeqFilterAndReopen(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 {
+	if version != 2 {
 		t.Fatalf("user_version = %d", version)
 	}
 	got, err = s.Events(ctx, "run-a", 0)

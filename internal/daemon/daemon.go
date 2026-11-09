@@ -44,15 +44,19 @@ type Options struct {
 	// a restart. A nil func, or a nil sender with a nil error, sends nothing
 	// and records no webhook event.
 	Webhook func() (*webhook.Sender, error)
-	Logger  *slog.Logger
+	// KeepAwake holds a sleep assertion until ctx ends when cfg.KeepAwake is
+	// true and at least one run is active. A nil func disables keep-awake.
+	KeepAwake func(ctx context.Context) error
+	Logger    *slog.Logger
 }
 
 type Daemon struct {
-	store    *store.Store
-	backends Backends
-	cfg      config.Config
-	webhook  func() (*webhook.Sender, error)
-	log      *slog.Logger
+	store     *store.Store
+	backends  Backends
+	cfg       config.Config
+	webhook   func() (*webhook.Sender, error)
+	keepAwake func(ctx context.Context) error
+	log       *slog.Logger
 
 	// ctx ends when Serve returns. Run goroutines, agent sessions, and
 	// webhook deliveries live inside it.
@@ -64,22 +68,65 @@ type Daemon struct {
 	writes context.Context
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	actors map[store.RunID]*actor
+	mu         sync.Mutex
+	actors     map[store.RunID]*actor
+	activeRuns map[store.RunID]bool
+	awakeStop  context.CancelFunc
+	awakeGen   uint64
 }
 
 func New(opts Options) *Daemon {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Daemon{
-		store:    opts.Store,
-		backends: opts.Backends,
-		cfg:      opts.Config,
-		webhook:  opts.Webhook,
-		log:      cmp.Or(opts.Logger, slog.New(slog.DiscardHandler)),
-		ctx:      ctx,
-		cancel:   cancel,
-		writes:   context.WithoutCancel(ctx),
-		actors:   map[store.RunID]*actor{},
+		store:      opts.Store,
+		backends:   opts.Backends,
+		cfg:        opts.Config,
+		webhook:    opts.Webhook,
+		keepAwake:  opts.KeepAwake,
+		log:        cmp.Or(opts.Logger, slog.New(slog.DiscardHandler)),
+		ctx:        ctx,
+		cancel:     cancel,
+		writes:     context.WithoutCancel(ctx),
+		actors:     map[store.RunID]*actor{},
+		activeRuns: map[store.RunID]bool{},
+	}
+}
+
+func (d *Daemon) setRunActive(id store.RunID, active bool) {
+	if !d.cfg.KeepAwake || d.keepAwake == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ctx.Err() != nil {
+		return
+	}
+	if active {
+		d.activeRuns[id] = true
+		if d.awakeStop == nil {
+			ctx, cancel := context.WithCancel(d.ctx)
+			d.awakeStop = cancel
+			d.awakeGen++
+			gen := d.awakeGen
+			d.wg.Go(func() {
+				err := d.keepAwake(ctx)
+				if err != nil && ctx.Err() == nil {
+					d.log.Warn("keep-awake exited", "err", err)
+				}
+				d.mu.Lock()
+				if d.awakeGen == gen {
+					d.awakeStop = nil
+				}
+				d.mu.Unlock()
+			})
+		}
+		return
+	}
+	delete(d.activeRuns, id)
+	if len(d.activeRuns) == 0 && d.awakeStop != nil {
+		d.awakeStop()
+		d.awakeStop = nil
+		d.awakeGen++
 	}
 }
 

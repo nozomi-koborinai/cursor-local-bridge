@@ -24,6 +24,7 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/daemon"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/keepawake"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 )
@@ -134,7 +135,8 @@ func runDaemon(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			}
 			return newSender(loaded.Webhook), nil
 		},
-		Logger: log,
+		KeepAwake: keepawake.Default(),
+		Logger:    log,
 	})
 	if err := d.Recover(ctx); err != nil {
 		return err
@@ -199,8 +201,8 @@ func (a *app) launchCmd() *cobra.Command {
 func (a *app) followUpCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "followup ID PROMPT",
-		Short: "Send a follow-up prompt, queued behind the turn in flight or resuming a finished run",
-		Long:  "Send a follow-up prompt, queued behind the turn in flight or resuming a finished run. A PROMPT of - reads the prompt from stdin.",
+		Short: "Send a follow-up prompt, queued behind the turn in flight or resuming a finished or failed run",
+		Long:  "Send a follow-up prompt, queued behind the turn in flight or resuming a finished or failed run. A PROMPT of - reads the prompt from stdin.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt, err := promptArg(cmd, args[1])

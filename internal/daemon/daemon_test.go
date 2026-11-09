@@ -783,18 +783,34 @@ func TestBackendErrorsFailTheRun(t *testing.T) {
 		waitClosed(t, h.agent.session(0))
 	})
 	t.Run("prompt", func(t *testing.T) {
-		h := newHarness(t, &fakeAgent{onPrompt: func(context.Context, *fakeSession, string) error {
-			return errors.New("agent exited with status 3")
+		h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, prompt string) error {
+			if prompt == "hello" {
+				return errors.New("agent exited with status 3")
+			}
+			return echo(ctx, s, prompt)
 		}})
 		run := h.launch("hello")
 		failed := h.waitStatus(run.ID, "failed")
 		if !strings.Contains(failed.Error, "agent exited with status 3") {
 			t.Errorf("error = %q", failed.Error)
 		}
+		if hook := h.hooks.next(t); hook.Status != "failed" || hook.Error != failed.Error {
+			t.Errorf("webhook = %+v", hook)
+		}
 		waitClosed(t, h.agent.session(0))
-		_, err := h.call(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "retry"})
-		if code := codeOf(err); code != ipc.CodeConflict {
-			t.Errorf("follow-up on a failed run: %v, want code %s", err, ipc.CodeConflict)
+		resumed := h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "retry"})
+		if resumed.Status != "queued" || resumed.Error != "" {
+			t.Errorf("after follow-up on failed run: %+v", resumed)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Summary != "retry" || done.Error != "" {
+			t.Errorf("resumed run = %+v", done)
+		}
+		if got := h.agent.session(1).startOptions().ResumeSessionID; got != failed.SessionID || got == "" {
+			t.Errorf("resumed session ID = %q, want %q", got, failed.SessionID)
+		}
+		if hook := h.hooks.next(t); hook.Status != "finished" || hook.Summary != "retry" {
+			t.Errorf("webhook = %+v", hook)
 		}
 	})
 }
@@ -1019,15 +1035,16 @@ func TestListShowsEveryRunNewestFirst(t *testing.T) {
 }
 
 type harness struct {
-	t        *testing.T
-	cfg      config.Config
-	repo     string
-	store    *store.Store
-	agent    *fakeAgent
-	hooks    *hookServer
-	backends daemon.Backends
-	webhook  func() (*webhook.Sender, error)
-	stop     func()
+	t         *testing.T
+	cfg       config.Config
+	repo      string
+	store     *store.Store
+	agent     *fakeAgent
+	hooks     *hookServer
+	backends  daemon.Backends
+	webhook   func() (*webhook.Sender, error)
+	keepAwake func(ctx context.Context) error
+	stop      func()
 }
 
 func newHarness(t *testing.T, agent *fakeAgent, edit ...func(*config.Config)) *harness {
@@ -1069,11 +1086,12 @@ func (h *harness) newDaemon() *daemon.Daemon {
 		load = func() (*webhook.Sender, error) { return h.hooks.sender(), nil }
 	}
 	return daemon.New(daemon.Options{
-		Store:    h.store,
-		Backends: h.backends,
-		Config:   h.cfg,
-		Webhook:  load,
-		Logger:   slog.New(slog.NewTextHandler(h.t.Output(), nil)),
+		Store:     h.store,
+		Backends:  h.backends,
+		Config:    h.cfg,
+		Webhook:   load,
+		KeepAwake: h.keepAwake,
+		Logger:    slog.New(slog.NewTextHandler(h.t.Output(), nil)),
 	})
 }
 

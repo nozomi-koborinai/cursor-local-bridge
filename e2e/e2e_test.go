@@ -273,6 +273,31 @@ func TestCLB(t *testing.T) {
 		}
 	})
 
+	step("a crashed run fails and followup resumes it on the same worktree", func(t *testing.T) {
+		launched := c.run(t, "launch", "--repo", repo, "[crash] oops")
+		failed := c.waitStatus(t, launched.ID, "failed")
+		if !strings.Contains(failed.Error, "crashing on purpose") {
+			t.Errorf("error = %q, want crash stderr", failed.Error)
+		}
+		checkSigned(t, hooks.wait(t, launched.ID, "failed", 1)[0])
+		if err := os.WriteFile(filepath.Join(failed.Worktree, "wip.txt"), []byte("kept\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		resumed := c.run(t, "followup", launched.ID, "recover from crash")
+		if resumed.Status != "queued" || resumed.Worktree != failed.Worktree {
+			t.Errorf("followup on failed run = %+v", resumed)
+		}
+		done := c.waitStatus(t, launched.ID, "finished")
+		if done.Summary != "echo: recover from crash" || done.SessionID != failed.SessionID {
+			t.Errorf("resumed run = %+v", done)
+		}
+		if b, err := os.ReadFile(filepath.Join(done.Worktree, "wip.txt")); err != nil || string(b) != "kept\n" {
+			t.Errorf("wip.txt in worktree = %q, %v", b, err)
+		}
+		checkSigned(t, hooks.wait(t, launched.ID, "finished", 1)[0])
+	})
+
 	step("SIGTERM stops the daemon cleanly", func(t *testing.T) {
 		if err := daemon.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
@@ -350,6 +375,49 @@ func TestTransportErrorAndPermissionReminder(t *testing.T) {
 	if finished := c.waitStatus(t, waitingRun.ID, "finished"); finished.Summary != "permission: approved" {
 		t.Fatalf("summary = %q", finished.Summary)
 	}
+}
+
+func TestStallWatchdogAndResume(t *testing.T) {
+	bin := t.TempDir()
+	c := &clb{path: buildCLB(t, bin), home: shortTempDir(t)}
+	agentPath, err := fakeagenttest.Build(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := newReceiver(t)
+	writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
+		"agentPath":    agentPath,
+		"stallTimeout": "300ms",
+		"keepAwake":    true,
+		"webhook": map[string]any{
+			"url":    hooks.url,
+			"secret": secret,
+		},
+	})
+	state := t.TempDir()
+	repo := gitRepo(t)
+	startDaemon(t, c, state)
+
+	launched := c.run(t, "launch", "--repo", repo, "[stall] freeze")
+	failed := c.waitStatus(t, launched.ID, "failed")
+	if failed.Error != "run stalled: no agent activity for 300ms" {
+		t.Fatalf("failed error = %q", failed.Error)
+	}
+	d := hooks.wait(t, launched.ID, "failed", 1)[0]
+	checkSigned(t, d)
+	if d.payload.Error != "run stalled: no agent activity for 300ms" {
+		t.Fatalf("webhook error = %q", d.payload.Error)
+	}
+
+	resumed := c.run(t, "followup", launched.ID, "continue after stall")
+	if resumed.Status != "queued" || resumed.Worktree != launched.Worktree {
+		t.Fatalf("followup after stall = %+v", resumed)
+	}
+	done := c.waitStatus(t, launched.ID, "finished")
+	if done.Summary != "echo: continue after stall" {
+		t.Fatalf("done summary = %q", done.Summary)
+	}
+	checkSigned(t, hooks.wait(t, launched.ID, "finished", 1)[0])
 }
 
 type clb struct {

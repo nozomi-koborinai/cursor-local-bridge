@@ -143,6 +143,9 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		crash()
 	case scriptSlow:
 		reply, err = a.slow(ctx, req.SessionId)
+	case scriptStall:
+		<-ctx.Done()
+		reply = ""
 	case scriptPermission:
 		reply, err = a.askPermission(ctx, req.SessionId)
 	case scriptBackground:

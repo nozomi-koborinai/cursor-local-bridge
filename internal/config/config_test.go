@@ -60,7 +60,9 @@ func TestLoadFullFile(t *testing.T) {
 		"worktreeDir": "/tmp/worktrees",
 		"webhook": {"url": "https://example.com/hook", "secret": "s3cret"},
 		"storeAllEvents": true,
-		"trustWorktree": true
+		"trustWorktree": true,
+		"stallTimeout": "10m",
+		"keepAwake": true
 	}`)
 	got, err := Load(home)
 	if err != nil {
@@ -76,6 +78,8 @@ func TestLoadFullFile(t *testing.T) {
 		Webhook:        Webhook{URL: "https://example.com/hook", Secret: NewSecret("s3cret")},
 		StoreAllEvents: true,
 		TrustWorktree:  true,
+		StallTimeout:   Duration(10 * time.Minute),
+		KeepAwake:      true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
@@ -351,6 +355,28 @@ func TestLoadTrustWorktree(t *testing.T) {
 	}
 }
 
+func TestLoadStallTimeoutAndKeepAwake(t *testing.T) {
+	home := testHome(t)
+	for _, body := range []string{`{"stallTimeout": ""}`, `{"stallTimeout": "0"}`, `{"stallTimeout": "0s"}`} {
+		writeConfig(t, home, body)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if got.StallTimeout.Duration() != 0 {
+			t.Fatalf("%s: StallTimeout = %v, want 0", body, got.StallTimeout.Duration())
+		}
+	}
+	writeConfig(t, home, `{"stallTimeout": "45s", "keepAwake": true}`)
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StallTimeout.Duration() != 45*time.Second || !got.KeepAwake {
+		t.Fatalf("StallTimeout = %v, KeepAwake = %v", got.StallTimeout.Duration(), got.KeepAwake)
+	}
+}
+
 func TestLoadRejectsInvalidFiles(t *testing.T) {
 	tests := []struct {
 		name string
@@ -370,6 +396,9 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{name: "bad reminder", body: `{"webhook":{"reminder":"soon"}}`, want: "webhook.reminder"},
 		{name: "zero reminder", body: `{"webhook":{"reminder":"0s"}}`, want: "webhook.reminder"},
 		{name: "negative reminder", body: `{"webhook":{"reminder":"-1s"}}`, want: "webhook.reminder"},
+		{name: "invalid stallTimeout", body: `{"stallTimeout":"ten-minutes"}`, want: "stallTimeout"},
+		{name: "negative stallTimeout", body: `{"stallTimeout":"-5s"}`, want: "stallTimeout"},
+		{name: "numeric stallTimeout", body: `{"stallTimeout":60}`, want: "stallTimeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
