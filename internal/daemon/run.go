@@ -457,6 +457,7 @@ const removeTimeout = time.Minute
 // the removal's error, if any, for the caller of the command.
 func (a *actor) removeWorktree(run store.Run) error {
 	a.awaitClosed()
+	proc.EndRecorded(a.d.procFile(run.ID))
 	var err error
 	if run.HasWorktree() {
 		proc.EndUnder(run.Worktree)
@@ -480,6 +481,7 @@ func (a *actor) removeWorktree(run store.Run) error {
 // background.
 func (a *actor) startBackend(run store.Run, resume bool) {
 	a.awaitClosed()
+	proc.EndRecorded(a.d.procFile(run.ID))
 	if run.HasWorktree() {
 		if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
 			a.fail(fmt.Errorf("create worktree: %w", err))
@@ -503,7 +505,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.sweepMu.Unlock()
 
 	requested, _ := splitRunModel(run.Model)
-	opts := backend.StartOptions{Dir: run.Dir(), Model: requested}
+	opts := backend.StartOptions{Dir: run.Dir(), Model: requested, ProcFile: a.d.procFile(run.ID)}
 	if resume {
 		opts.ResumeSessionID = run.SessionID
 	}
@@ -1025,6 +1027,10 @@ func (s sink) Event(e backend.Event) {
 
 func (s sink) SetModel(model string) {
 	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
+}
+
+func (s sink) ProcDir() string {
+	return s.a.d.procFile(s.a.id)
 }
 
 func (s sink) AgentProcess(p backend.AgentProcess) {

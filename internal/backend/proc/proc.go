@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -61,13 +62,14 @@ type Process struct {
 	// command exits, so output written just before an exit is not lost.
 	Stdout *os.File
 
-	cmd      *exec.Cmd
-	mark     string
-	family   *family
-	stderr   *stderrLog
-	done     chan struct{}
-	err      error
-	stopOnce sync.Once
+	cmd        *exec.Cmd
+	mark       string
+	recordFile string
+	family     *family
+	stderr     *stderrLog
+	done       chan struct{}
+	err        error
+	stopOnce   sync.Once
 }
 
 // Start starts cmd in a new process group and adds CLB_PROC_TOKEN, with a
@@ -80,6 +82,13 @@ type Process struct {
 // closes. Wait does not return while onStderr runs, so onStderr must not
 // block on anything that waits for the process.
 func Start(cmd *exec.Cmd, onStderr func(StderrLine)) (*Process, error) {
+	return StartRecorded(cmd, "", onStderr)
+}
+
+// StartRecorded is Start and also writes the process's group and token under
+// recordDir when recordDir is not empty, so EndRecorded can stop the process
+// if this daemon crashes before Stop runs.
+func StartRecorded(cmd *exec.Cmd, recordDir string, onStderr func(StderrLine)) (*Process, error) {
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, err
@@ -108,6 +117,7 @@ func Start(cmd *exec.Cmd, onStderr func(StderrLine)) (*Process, error) {
 	}
 	// Before Wait can reap the process and free its pid for reuse.
 	p.family = watchFamily(cmd.Process.Pid)
+	p.recordFile = writeRecord(recordDir, cmd.Process.Pid, p.mark)
 	go func() {
 		p.err = cmd.Wait()
 		p.stderr.flush()
@@ -178,7 +188,110 @@ func (p *Process) Stop() {
 			return err == nil && hasEntry(env, p.mark)
 		})
 		p.family.close()
+		removeRecord(p.recordFile, p.mark)
 	})
+}
+
+// EndRecorded stops every process group and token-bearing descendant recorded
+// under recordDir by StartRecorded, then removes the records. A missing or
+// unreadable directory does nothing.
+func EndRecorded(recordDir string) {
+	if recordDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(recordDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		endRecordFile(filepath.Join(recordDir, entry.Name()))
+	}
+	_ = os.Remove(recordDir)
+}
+
+func endRecordFile(recordFile string) {
+	data, err := os.ReadFile(recordFile)
+	if err != nil {
+		return
+	}
+	pgid, id, mark, ok := parseRecord(string(data))
+	if ok && sameGroup(pgid, id) {
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		deadline := time.Now().Add(stopGrace)
+		for sameGroup(pgid, id) && syscall.Kill(-pgid, 0) == nil && time.Now().Before(deadline) {
+			time.Sleep(reapPoll)
+		}
+		if sameGroup(pgid, id) {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}
+	if strings.HasPrefix(mark, tokenVar+"=") {
+		reap(func(pid int) bool {
+			env, err := environOf(pid)
+			return err == nil && hasEntry(env, mark)
+		})
+	}
+	removeRecord(recordFile, mark)
+}
+
+func writeRecord(dir string, pgid int, mark string) string {
+	if dir == "" {
+		return ""
+	}
+	id, _ := processIdentity(pgid)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, strconv.Itoa(pgid))
+	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d %s\n", pgid, id, mark), 0o600); err != nil {
+		return ""
+	}
+	return path
+}
+
+func removeRecord(path, mark string) {
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if _, _, got, ok := parseRecord(string(data)); ok && got != mark {
+		return
+	}
+	_ = os.Remove(path)
+	_ = os.Remove(filepath.Dir(path))
+}
+
+func parseRecord(s string) (pgid int, id uint64, mark string, ok bool) {
+	fields := strings.Fields(s)
+	if len(fields) != 3 {
+		return 0, 0, "", false
+	}
+	p, err := strconv.Atoi(fields[0])
+	if err != nil || p <= 1 {
+		return 0, 0, "", false
+	}
+	u, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return p, u, fields[2], true
+}
+
+func sameGroup(pgid int, id uint64) bool {
+	if pgid <= 1 || id == 0 {
+		return false
+	}
+	cur, err := processIdentity(pgid)
+	if err == nil {
+		return cur == id
+	}
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist)
 }
 
 // EndUnder ends this user's processes, other than this one, whose working

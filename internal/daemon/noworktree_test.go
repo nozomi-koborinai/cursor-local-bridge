@@ -7,9 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
@@ -136,7 +138,17 @@ func TestNoWorktreeFinishAndStopLeaveProcesses(t *testing.T) {
 }
 
 func TestNoWorktreeRecoverLeavesProcesses(t *testing.T) {
-	h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, _ *fakeSession, _ string) error {
+	var orphanPid int
+	h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, _ string) error {
+		cmd := exec.Command("sleep", "120")
+		cmd.Dir = s.startOptions().Dir
+		p, err := proc.StartRecorded(cmd, s.startOptions().ProcFile, nil)
+		if err != nil {
+			return err
+		}
+		_ = p.Stdout.Close()
+		orphanPid = cmd.Process.Pid
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
 		<-ctx.Done()
 		return ctx.Err()
 	}})
@@ -148,6 +160,9 @@ func TestNoWorktreeRecoverLeavesProcesses(t *testing.T) {
 	run := h.must(ipc.Request{Method: ipc.MethodLaunch, Repo: dir, Prompt: "work", NoWorktree: true})
 	h.waitStatus(run.ID, "running")
 	h.stop()
+	if orphanPid == 0 || syscall.Kill(orphanPid, 0) != nil {
+		t.Fatalf("orphan agent pid %d is not running after daemon crash", orphanPid)
+	}
 	sleeping := sleepIn(t, dir)
 	if r, err := h.store.GetRun(context.Background(), store.RunID(run.ID)); err != nil || r.Lifecycle.State != lifecycle.Running {
 		t.Fatalf("stored run after the crash = %s, %v; want it still running", r.Lifecycle.State, err)
@@ -159,6 +174,13 @@ func TestNoWorktreeRecoverLeavesProcesses(t *testing.T) {
 	}
 	h.serve(d)
 
+	deadline := time.Now().Add(timeout)
+	for syscall.Kill(orphanPid, 0) == nil {
+		if time.Now().After(deadline) {
+			t.Fatalf("Recover left the orphaned --no-worktree agent process %d running", orphanPid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	time.Sleep(200 * time.Millisecond)
 	select {
 	case <-sleeping:

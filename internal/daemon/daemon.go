@@ -146,9 +146,10 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 // store. Call it before Serve. Calling it again changes nothing.
 //
 // A run's agent runs in its own process group, so it and its commands can
-// outlive a daemon crash. Recover ends the processes working in the
-// worktree of each run it fails. A run without a worktree keeps the
-// directory the user named, so Recover does not end processes there.
+// outlive a daemon crash. Recover ends the recorded agent process group and
+// token-bearing descendants of each active run, and for a worktree run also
+// ends the processes working in its worktree. A run without a worktree keeps
+// the directory the user named, so Recover does not sweep that directory.
 func (d *Daemon) Recover(ctx context.Context) error {
 	runs, err := d.store.ListRuns(ctx)
 	if err != nil {
@@ -156,6 +157,7 @@ func (d *Daemon) Recover(ctx context.Context) error {
 	}
 	for _, r := range runs {
 		if r.Lifecycle.State.Active() {
+			proc.EndRecorded(d.procFile(r.ID))
 			if r.HasWorktree() {
 				proc.EndUnder(r.Worktree)
 			}
@@ -169,6 +171,13 @@ func (d *Daemon) Recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) procFile(id store.RunID) string {
+	if d.cfg.Home == "" {
+		return ""
+	}
+	return filepath.Join(d.cfg.Home, "procs", string(id))
 }
 
 func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Response) error) error {

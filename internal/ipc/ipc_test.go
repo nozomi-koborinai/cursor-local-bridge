@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -177,7 +178,7 @@ func TestCleanAndRunJSON(t *testing.T) {
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded != req {
+	if !reflect.DeepEqual(decoded, req) {
 		t.Fatalf("request = %+v, want %+v", decoded, req)
 	}
 

@@ -30,7 +30,11 @@ func StartAgent(ctx context.Context, cmd *exec.Cmd, command Command, sink Sink) 
 	}
 	reported := make(chan struct{})
 	var pid int
-	p, err := proc.Start(cmd, func(l proc.StderrLine) {
+	var procDir string
+	if pr, ok := sink.(ProcRecorder); ok {
+		procDir = pr.ProcDir()
+	}
+	p, err := proc.StartRecorded(cmd, procDir, func(l proc.StderrLine) {
 		<-reported
 		sink.Stderr(Stderr{PID: pid, Line: l.Text, Capped: l.Capped})
 	})
