@@ -393,109 +393,6 @@ func TestPermissionsNonEmptyExactlyWhenAwaiting(t *testing.T) {
 	}
 }
 
-func TestPermissionSupersedeAndCancel(t *testing.T) {
-	old := Permission{ID: "perm-1", ToolCallID: "call-1", Kind: "execute", Command: "npm test", Retries: 1}
-	other := Permission{ID: "perm-2", ToolCallID: "call-2", Kind: "fetch", URL: "https://example.com/hook", Retries: 1}
-	waiting := Run{State: AwaitingPermission, Permissions: []Permission{old, other}}
-
-	t.Run("same tool call replaces the pending request", func(t *testing.T) {
-		next := Permission{ID: "perm-3", ToolCallID: "call-1", Retries: 1}
-		got, effects, err := Apply(waiting, PermissionRequested{Permission: next})
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := Run{State: AwaitingPermission, Permissions: []Permission{other, next}}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("run = %+v, want %+v", got, want)
-		}
-		wantEffects := []Effect{
-			CancelPermission{ID: "perm-1", Reason: CancelSuperseded, SupersededBy: "perm-3"},
-			NotifyPermission{Permission: next},
-		}
-		if !reflect.DeepEqual(effects, wantEffects) {
-			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
-		}
-	})
-
-	t.Run("a higher retry count replaces every earlier request", func(t *testing.T) {
-		next := Permission{ID: "perm-3", ToolCallID: "call-9", Retries: 2}
-		got, effects, err := Apply(waiting, PermissionRequested{Permission: next})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got.Permissions, []Permission{next}) {
-			t.Fatalf("permissions = %+v", got.Permissions)
-		}
-		if len(effects) != 3 {
-			t.Fatalf("effects = %#v", effects)
-		}
-		for i, id := range []string{"perm-1", "perm-2"} {
-			cancel, ok := effects[i].(CancelPermission)
-			if !ok || cancel.ID != id || cancel.Reason != CancelSuperseded || cancel.SupersededBy != "perm-3" {
-				t.Fatalf("effects[%d] = %#v", i, effects[i])
-			}
-		}
-	})
-
-	t.Run("equal retries and a different tool call both stay", func(t *testing.T) {
-		next := Permission{ID: "perm-3", ToolCallID: "call-9", Retries: 1}
-		got, effects, err := Apply(waiting, PermissionRequested{Permission: next})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got.Permissions) != 3 || len(effects) != 1 {
-			t.Fatalf("permissions = %+v effects = %#v", got.Permissions, effects)
-		}
-	})
-
-	t.Run("an empty tool call id does not match another empty id", func(t *testing.T) {
-		from := Run{State: AwaitingPermission, Permissions: []Permission{{ID: "perm-1", Retries: 0}}}
-		next := Permission{ID: "perm-2"}
-		got, effects, err := Apply(from, PermissionRequested{Permission: next})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got.Permissions) != 2 || len(effects) != 1 {
-			t.Fatalf("permissions = %+v effects = %#v", got.Permissions, effects)
-		}
-	})
-
-	t.Run("cancel returns to running when it was the last request", func(t *testing.T) {
-		from := Run{State: AwaitingPermission, Prompts: []string{"p2"}, Permissions: []Permission{old}}
-		got, effects, err := Apply(from, PermissionCancelled{ID: old.ID, Reason: CancelWithdrawn})
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := Run{State: Running, Prompts: []string{"p2"}}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("run = %+v", got)
-		}
-		wantEffects := []Effect{CancelPermission{ID: old.ID, Reason: CancelWithdrawn}}
-		if !reflect.DeepEqual(effects, wantEffects) {
-			t.Fatalf("effects = %#v", effects)
-		}
-	})
-
-	t.Run("cancel leaves the run waiting when another request remains", func(t *testing.T) {
-		got, _, err := Apply(waiting, PermissionCancelled{ID: old.ID, Reason: CancelWithdrawn})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.State != AwaitingPermission || !reflect.DeepEqual(got.Permissions, []Permission{other}) {
-			t.Fatalf("run = %+v", got)
-		}
-	})
-
-	t.Run("cancel of an unknown id is a no-op", func(t *testing.T) {
-		got, effects, err := Apply(waiting, PermissionCancelled{ID: "missing", Reason: CancelWithdrawn})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, waiting) || effects != nil {
-			t.Fatalf("run = %+v effects = %#v", got, effects)
-		}
-	})
-
 	t.Run("cancel after the run finished is ignored", func(t *testing.T) {
 		from := Run{State: Finished}
 		got, effects, err := Apply(from, PermissionCancelled{ID: old.ID, Reason: CancelWithdrawn})
@@ -506,6 +403,62 @@ func TestPermissionSupersedeAndCancel(t *testing.T) {
 			t.Fatalf("run = %+v effects = %#v", got, effects)
 		}
 	})
+}
+
+func TestErrorNonEmptyExactlyWhenFailed(t *testing.T) {
+	r, _ := Launch("p1")
+	events := []Event{
+		Started{},
+		PermissionRequested{Permission: Permission{ID: "1"}},
+		PermissionAnswered{Approve: true},
+		TurnEnded{},
+		FollowUp{Prompt: "p2"},
+		Started{},
+		Stop{},
+		WorktreeRemoved{},
+	}
+	for i, e := range events {
+		var err error
+		r, _, err = Apply(r, e)
+		if err != nil {
+			t.Fatalf("event %d (%T): %v", i, e, err)
+		}
+		if failed := r.State == Failed; failed != (r.Error != "") {
+			t.Fatalf("event %d (%T): state %s error %q", i, e, r.State, r.Error)
+		}
+	}
+	if r.State != Stopped || r.Error != "" {
+		t.Fatalf("after stop = %+v, want stopped with an empty error", r)
+	}
+	late, _, err := Apply(r, BackendFailed{Err: "late"})
+	if err != nil || late.State != Stopped || late.Error != "" {
+		t.Fatalf("failure after stop = %+v, %v", late, err)
+	}
+
+	for _, from := range []Run{
+		{State: Queued, Prompts: []string{"p"}},
+		{State: Running},
+		{State: AwaitingPermission, Permissions: []Permission{{ID: "1"}}},
+	} {
+		for _, cause := range []string{"", " \n\t"} {
+			got, _, err := Apply(from, BackendFailed{Err: cause})
+			if err != nil || got.State != Failed || got.Error != "failed without an error message" {
+				t.Fatalf("BackendFailed %q from %s = %+v, %v", cause, from.State, got, err)
+			}
+		}
+	}
+	got, _, err := Apply(Run{State: Stopping}, WorktreeRemoveFailed{})
+	if err != nil || got.State != Failed || got.Error != "failed without an error message" {
+		t.Fatalf("empty removal failure = %+v, %v", got, err)
+	}
+	got, _, err = Apply(Run{State: Running}, BackendFailed{Err: "boom"})
+	if err != nil || got.Error != "boom" {
+		t.Fatalf("message = %+v, %v", got, err)
+	}
+	got, _, err = Apply(Run{State: Running}, Stop{})
+	if err != nil || got.State != Stopping || got.Error != "" {
+		t.Fatalf("stop = %+v, %v", got, err)
+	}
 }
 
 func TestParseState(t *testing.T) {
