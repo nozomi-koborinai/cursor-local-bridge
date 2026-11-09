@@ -74,6 +74,12 @@ func runPrint(o printOptions, prompt string) error {
 	}
 	var reply string
 	switch scriptFor(prompt) {
+	case scriptStderr:
+		writeDiag(prompt)
+		reply = "echo: " + prompt
+		if err := assistant(reply); err != nil {
+			return err
+		}
 	case scriptCrash:
 		if err := assistant("about to crash"); err != nil {
 			return err
