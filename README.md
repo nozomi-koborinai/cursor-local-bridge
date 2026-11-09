@@ -218,7 +218,7 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 </details>
 
 - Empty fields (`summary`, `error`, `model`, `pendingPermission`) are omitted.
-- `summary` joins the agent's reply text blocks from its most recent turn with newlines.
+- `summary` holds only the final assistant message from the run's most recent turn (or the last completed assistant message if the turn ended after a tool call with no further reply). Intermediate narration before tool calls and messages from earlier turns stay out of `summary`; run `clb logs <id>` to read the full multi-turn transcript.
 - `error` says why the run failed, including up to the first 512 bytes of agent stderr.
 - `pendingPermission` is the oldest unanswered permission request. `clb approve` selects the option with `kind: "allow_once"` and `clb deny` selects `kind: "reject_once"` (or cancels if neither is offered).
 
@@ -322,7 +322,7 @@ The daemon logs to `~/.clb/daemon.log` and includes `~/.local/bin` on `PATH`. If
 
 ## Known gaps
 
-Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered the main `acp` flows (streaming events, file edits, approve/deny permission requests, `session/load` follow-up, `--model`, unknown-model errors, multi-block `summary`, and mid-turn `stop`) and `print` launch/follow-up with `trustWorktree`. Process cleanup and hidden-environment edge cases are tested against the fake agent in CI.
+Manual tests against Cursor CLI 2026.09.18 with a logged-in account covered the main `acp` flows (streaming events, file edits, approve/deny permission requests, `session/load` follow-up, `--model`, unknown-model errors, `summary`, and mid-turn `stop`) and `print` launch/follow-up with `trustWorktree`. Process cleanup and hidden-environment edge cases are tested against the fake agent in CI.
 
 Remaining limitations:
 

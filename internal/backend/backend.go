@@ -42,7 +42,7 @@ type Event struct {
 	Type string
 	Data json.RawMessage
 	// Text is the agent's reply text carried by this event, if any. The
-	// daemon joins it into the run summary.
+	// daemon uses it to build the run summary.
 	Text string
 }
 

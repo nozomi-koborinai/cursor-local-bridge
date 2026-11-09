@@ -358,43 +358,40 @@ func (a *actor) agentEvent(g *generation, e backend.Event) {
 	g.turn.add(e)
 }
 
-// turnSummary is the turn's message text. A tool call ends the block in
-// progress, so the text before it and the text after it stay separate. Other
-// events, including thought chunks, stay in the current block.
 type turnSummary struct {
-	blocks []string
-	cur    strings.Builder
+	lastMessage    string
+	currentMessage strings.Builder
 }
 
 func (s *turnSummary) add(e backend.Event) {
 	if e.Type == "tool_call" || e.Type == "tool_call_update" {
-		s.endBlock()
+		s.endMessage()
 		return
 	}
-	s.cur.WriteString(e.Text)
+	if e.Type == "assistant" {
+		s.endMessage()
+	}
+	s.currentMessage.WriteString(e.Text)
 }
 
-func (s *turnSummary) endBlock() {
-	if s.cur.Len() == 0 {
+func (s *turnSummary) endMessage() {
+	if s.currentMessage.Len() == 0 {
 		return
 	}
-	s.blocks = append(s.blocks, s.cur.String())
-	s.cur.Reset()
+	s.lastMessage = s.currentMessage.String()
+	s.currentMessage.Reset()
 }
 
 func (s *turnSummary) String() string {
-	if s.cur.Len() == 0 {
-		return strings.Join(s.blocks, "\n")
+	if s.currentMessage.Len() > 0 {
+		return s.currentMessage.String()
 	}
-	blocks := make([]string, len(s.blocks)+1)
-	copy(blocks, s.blocks)
-	blocks[len(s.blocks)] = s.cur.String()
-	return strings.Join(blocks, "\n")
+	return s.lastMessage
 }
 
 func (s *turnSummary) Reset() {
-	s.blocks = nil
-	s.cur.Reset()
+	s.lastMessage = ""
+	s.currentMessage.Reset()
 }
 
 func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
