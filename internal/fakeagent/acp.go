@@ -207,6 +207,8 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		reply = ""
 	case scriptPermission:
 		reply, err = a.askPermission(ctx, req.SessionId)
+	case scriptPermissions:
+		reply, err = a.askPermissions(ctx, req.SessionId)
 	case scriptBackground:
 		reply, err = a.background(ctx, req.SessionId, c.Cwd)
 	case scriptTransport:
@@ -302,16 +304,73 @@ func (a *fakeACP) askPermission(ctx context.Context, sid acp.SessionId) (string,
 				continue
 			}
 			switch o.Kind {
-			case acp.PermissionOptionKindAllowOnce, acp.PermissionOptionKindAllowAlways:
+			case acp.PermissionOptionKindAllowOnce:
 				reply = "permission: approved"
-			case acp.PermissionOptionKindRejectOnce, acp.PermissionOptionKindRejectAlways:
+			case acp.PermissionOptionKindAllowAlways:
+				reply = "permission: approved (allow-always)"
+			case acp.PermissionOptionKindRejectOnce:
 				reply = "permission: denied"
+			case acp.PermissionOptionKindRejectAlways:
+				reply = "permission: denied (reject-always)"
 			}
 		}
 		if reply == "" {
 			return "", fmt.Errorf("unknown permission option %q", sel.OptionId)
 		}
 	}
+	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
+}
+
+func (a *fakeACP) askPermissions(ctx context.Context, sid acp.SessionId) (string, error) {
+	options := []acp.PermissionOption{
+		{OptionId: "allow-once", Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
+		{OptionId: "allow-always", Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
+		{OptionId: "reject-once", Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+	}
+	type result struct {
+		outcome string
+		err     error
+	}
+	ask := func(call acp.ToolCallUpdate) result {
+		resp, err := a.connection().RequestPermission(ctx, acp.RequestPermissionRequest{
+			SessionId: sid,
+			ToolCall:  call,
+			Options:   options,
+		})
+		if err != nil {
+			return result{err: err}
+		}
+		if sel := resp.Outcome.Selected; sel != nil {
+			return result{outcome: string(sel.OptionId)}
+		}
+		return result{outcome: "cancelled"}
+	}
+	firstCh := make(chan result, 1)
+	go func() {
+		firstCh <- ask(acp.ToolCallUpdate{
+			ToolCallId: "call-1",
+			Title:      acp.Ptr("Run fake test"),
+			Kind:       acp.Ptr(acp.ToolKindExecute),
+			Status:     acp.Ptr(acp.ToolCallStatusPending),
+			RawInput:   map[string]any{"command": "npm test"},
+		})
+	}()
+	time.Sleep(30 * time.Millisecond)
+	second := ask(acp.ToolCallUpdate{
+		ToolCallId: "call-2",
+		Title:      acp.Ptr("Fetch fake URL"),
+		Kind:       acp.Ptr(acp.ToolKindFetch),
+		Status:     acp.Ptr(acp.ToolCallStatusPending),
+		RawInput:   map[string]any{"url": "https://example.com/hook"},
+	})
+	first := <-firstCh
+	if first.err != nil {
+		return "", first.err
+	}
+	if second.err != nil {
+		return "", second.err
+	}
+	reply := fmt.Sprintf("permissions: call-1=%s call-2=%s", first.outcome, second.outcome)
 	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
 }
 

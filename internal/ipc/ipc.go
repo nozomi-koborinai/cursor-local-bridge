@@ -34,6 +34,16 @@ type Request struct {
 	Backend string `json:"backend,omitempty"`
 	// Follow keeps a logs call open until the run is no longer active.
 	Follow bool `json:"follow,omitempty"`
+	// PermissionID and PermissionIDs target specific pending permissions on
+	// approve or deny. When both are empty and All is false, the oldest pending
+	// permission is answered.
+	PermissionID  string   `json:"permissionId,omitempty"`
+	PermissionIDs []string `json:"permissionIds,omitempty"`
+	All           bool     `json:"all,omitempty"`
+	// Option selects the ACP permission option (such as allow-once,
+	// allow-always, or reject) or an exact optionId from the permission's
+	// options.
+	Option string `json:"option,omitempty"`
 }
 
 // Response is one reply line. Logs calls get one line per event. Every other
@@ -60,21 +70,22 @@ type Error struct {
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
 type Run struct {
-	ID                string      `json:"id"`
-	Status            string      `json:"status"`
-	Repo              string      `json:"repo"`
-	BaseRef           string      `json:"baseRef"`
-	Branch            string      `json:"branch"`
-	Worktree          string      `json:"worktree"`
-	Backend           string      `json:"backend"`
-	Model             string      `json:"model,omitempty"`
-	SessionID         string      `json:"sessionId,omitempty"`
-	Summary           string      `json:"summary,omitempty"`
-	Error             string      `json:"error,omitempty"`
-	QueuedPrompts     int         `json:"queuedPrompts"`
-	PendingPermission *Permission `json:"pendingPermission,omitempty"`
-	CreatedAt         time.Time   `json:"createdAt"`
-	UpdatedAt         time.Time   `json:"updatedAt"`
+	ID                 string       `json:"id"`
+	Status             string       `json:"status"`
+	Repo               string       `json:"repo"`
+	BaseRef            string       `json:"baseRef"`
+	Branch             string       `json:"branch"`
+	Worktree           string       `json:"worktree"`
+	Backend            string       `json:"backend"`
+	Model              string       `json:"model,omitempty"`
+	SessionID          string       `json:"sessionId,omitempty"`
+	Summary            string       `json:"summary,omitempty"`
+	Error              string       `json:"error,omitempty"`
+	QueuedPrompts      int          `json:"queuedPrompts"`
+	PendingPermission  *Permission  `json:"pendingPermission,omitempty"`
+	PendingPermissions []Permission `json:"pendingPermissions,omitempty"`
+	CreatedAt          time.Time    `json:"createdAt"`
+	UpdatedAt          time.Time    `json:"updatedAt"`
 }
 
 // Permission is the oldest unanswered permission request of a run.

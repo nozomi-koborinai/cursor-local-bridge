@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -516,4 +517,149 @@ func TestParseState(t *testing.T) {
 	if _, err := ParseState("done"); err == nil {
 		t.Error("ParseState accepted an unknown state")
 	}
+}
+
+func TestPermissionGranularity(t *testing.T) {
+	optsAll := json.RawMessage(`[
+		{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+		{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+		{"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+	]`)
+	optsOnceOnly := json.RawMessage(`[
+		{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+		{"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+	]`)
+	perm1 := Permission{ID: "perm-1", Title: "Run test", Options: optsAll}
+	perm2 := Permission{ID: "perm-2", Title: "Fetch URL", Options: optsOnceOnly}
+	both := Run{State: AwaitingPermission, Permissions: []Permission{perm1, perm2}}
+
+	t.Run("target specific permission id out of order", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, PermissionID: "perm-2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: AwaitingPermission, Permissions: []Permission{perm1}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{AnswerPermission{ID: "perm-2", Approve: true, Option: "allow_once", OptionID: "allow-once"}}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
+
+	t.Run("select allow-always option", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, PermissionID: "perm-1", Option: "allow-always"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: AwaitingPermission, Permissions: []Permission{perm2}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{AnswerPermission{ID: "perm-1", Approve: true, Option: "allow_always", OptionID: "allow-always"}}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
+
+	t.Run("select reject option via approve --option reject", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, PermissionID: "perm-1", Option: "reject"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: AwaitingPermission, Permissions: []Permission{perm2}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{AnswerPermission{ID: "perm-1", Approve: false, Option: "reject_once", OptionID: "reject-once"}}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
+
+	t.Run("approve all pending permissions", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, All: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: Running}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{
+			AnswerPermission{ID: "perm-1", Approve: true, Option: "allow_once", OptionID: "allow-once"},
+			AnswerPermission{ID: "perm-2", Approve: true, Option: "allow_once", OptionID: "allow-once"},
+		}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
+
+	t.Run("deny all pending permissions", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: false, All: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: Running}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{
+			AnswerPermission{ID: "perm-1", Approve: false, Option: "reject_once", OptionID: "reject-once"},
+			AnswerPermission{ID: "perm-2", Approve: false, Option: "reject_once", OptionID: "reject-once"},
+		}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
+
+	t.Run("rejects unknown permission id", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, PermissionID: "perm-99"})
+		if !errors.Is(err, ErrNotAllowed) || !reflect.DeepEqual(got, both) || effects != nil {
+			t.Fatalf("got = %+v, effects = %#v, err = %v", got, effects, err)
+		}
+	})
+
+	t.Run("rejects option not offered on targeted permission", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, PermissionID: "perm-2", Option: "allow-always"})
+		if !errors.Is(err, ErrNotAllowed) || !reflect.DeepEqual(got, both) || effects != nil {
+			t.Fatalf("got = %+v, effects = %#v, err = %v", got, effects, err)
+		}
+	})
+
+	t.Run("all-or-nothing when one permission lacks the requested option", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: true, All: true, Option: "allow-always"})
+		if !errors.Is(err, ErrNotAllowed) || !reflect.DeepEqual(got, both) || effects != nil {
+			t.Fatalf("got = %+v, effects = %#v, err = %v", got, effects, err)
+		}
+	})
+
+	t.Run("rejects deny with allow option", func(t *testing.T) {
+		got, effects, err := Apply(both, PermissionAnswered{Approve: false, Option: "allow-once"})
+		if !errors.Is(err, ErrNotAllowed) || !reflect.DeepEqual(got, both) || effects != nil {
+			t.Fatalf("got = %+v, effects = %#v, err = %v", got, effects, err)
+		}
+	})
+
+	t.Run("default approve without allow_once unblocks without selecting allow_always", func(t *testing.T) {
+		alwaysOnly := Permission{
+			ID:      "perm-always",
+			Title:   "Run tool",
+			Options: json.RawMessage(`[{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]`),
+		}
+		from := Run{State: AwaitingPermission, Permissions: []Permission{alwaysOnly}}
+		got, effects, err := Apply(from, PermissionAnswered{Approve: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := Run{State: Running}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run = %+v, want %+v", got, want)
+		}
+		wantEffects := []Effect{AnswerPermission{ID: "perm-always", Approve: true}}
+		if !reflect.DeepEqual(effects, wantEffects) {
+			t.Fatalf("effects = %#v, want %#v", effects, wantEffects)
+		}
+	})
 }

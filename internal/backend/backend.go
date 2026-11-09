@@ -71,6 +71,13 @@ type Event struct {
 	Text string
 }
 
+const (
+	OptionAllowOnce    = "allow_once"
+	OptionAllowAlways  = "allow_always"
+	OptionRejectOnce   = "reject_once"
+	OptionRejectAlways = "reject_always"
+)
+
 // PermissionRequest describes a tool call the agent wants approved.
 type PermissionRequest struct {
 	Title      string
@@ -82,6 +89,12 @@ type PermissionRequest struct {
 	// Options is the agent's permission choices as a JSON array of optionId,
 	// name, and kind.
 	Options json.RawMessage
+}
+
+type PermissionDecision struct {
+	Approved bool
+	Option   string
+	OptionID string
 }
 
 // Sink receives what a session produces. Implementations are safe for
@@ -96,4 +109,27 @@ type Sink interface {
 // effort resolved for the session.
 type ModelReporter interface {
 	SetModel(model string)
+}
+
+// DecisionSink is an optional extension of Sink that returns the full
+// PermissionDecision, including the chosen option kind or optionId.
+type DecisionSink interface {
+	Sink
+	PermissionDecision(ctx context.Context, req PermissionRequest) (PermissionDecision, error)
+}
+
+// AskPermission calls s.PermissionDecision when s implements DecisionSink, or
+// falls back to s.Permission with allow_once or reject_once.
+func AskPermission(ctx context.Context, s Sink, req PermissionRequest) (PermissionDecision, error) {
+	if ds, ok := s.(DecisionSink); ok {
+		return ds.PermissionDecision(ctx, req)
+	}
+	approve, err := s.Permission(ctx, req)
+	if err != nil {
+		return PermissionDecision{}, err
+	}
+	if approve {
+		return PermissionDecision{Approved: true, Option: OptionAllowOnce}, nil
+	}
+	return PermissionDecision{Approved: false, Option: OptionRejectOnce}, nil
 }

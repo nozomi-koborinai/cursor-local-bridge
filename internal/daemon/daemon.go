@@ -209,11 +209,38 @@ func (d *Daemon) runCall(ctx context.Context, req ipc.Request) (store.Run, error
 	case ipc.MethodStop:
 		return d.command(ctx, id, lifecycle.Stop{})
 	case ipc.MethodApprove:
-		return d.command(ctx, id, lifecycle.PermissionAnswered{Approve: true})
+		ans, err := permissionAnswer(req, true)
+		if err != nil {
+			return store.Run{}, err
+		}
+		return d.command(ctx, id, ans)
 	case ipc.MethodDeny:
-		return d.command(ctx, id, lifecycle.PermissionAnswered{Approve: false})
+		ans, err := permissionAnswer(req, false)
+		if err != nil {
+			return store.Run{}, err
+		}
+		return d.command(ctx, id, ans)
 	}
 	return store.Run{}, invalid(fmt.Sprintf("unknown method %q", req.Method))
+}
+
+func permissionAnswer(req ipc.Request, approve bool) (lifecycle.PermissionAnswered, error) {
+	if req.All && (strings.TrimSpace(req.PermissionID) != "" || len(req.PermissionIDs) > 0) {
+		return lifecycle.PermissionAnswered{}, invalid("cannot combine --all with a permission id")
+	}
+	opt := strings.TrimSpace(req.Option)
+	if !approve && opt != "" {
+		if _, allow, ok := lifecycle.ParsePermissionOption(opt); ok && allow {
+			return lifecycle.PermissionAnswered{}, invalid(fmt.Sprintf("cannot deny with option %q", opt))
+		}
+	}
+	return lifecycle.PermissionAnswered{
+		Approve:       approve,
+		Option:        opt,
+		PermissionID:  req.PermissionID,
+		PermissionIDs: req.PermissionIDs,
+		All:           req.All,
+	}, nil
 }
 
 func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error) {
@@ -397,17 +424,20 @@ func toIPCRun(r store.Run) ipc.Run {
 		UpdatedAt:     r.UpdatedAt,
 	}
 	if len(r.Lifecycle.Permissions) > 0 {
-		p := r.Lifecycle.Permissions[0]
-		out.PendingPermission = &ipc.Permission{
-			ID:         p.ID,
-			Title:      p.Title,
-			ToolCallID: p.ToolCallID,
-			Kind:       p.Kind,
-			Command:    p.Command,
-			URL:        p.URL,
-			ToolCall:   p.ToolCall,
-			Options:    p.Options,
+		out.PendingPermissions = make([]ipc.Permission, len(r.Lifecycle.Permissions))
+		for i, p := range r.Lifecycle.Permissions {
+			out.PendingPermissions[i] = ipc.Permission{
+				ID:         p.ID,
+				Title:      p.Title,
+				ToolCallID: p.ToolCallID,
+				Kind:       p.Kind,
+				Command:    p.Command,
+				URL:        p.URL,
+				ToolCall:   p.ToolCall,
+				Options:    p.Options,
+			}
 		}
+		out.PendingPermission = &out.PendingPermissions[0]
 	}
 	return out
 }

@@ -412,6 +412,136 @@ func TestTransportErrorIsStoredApartFromSummary(t *testing.T) {
 	}
 }
 
+func TestPermissionGranularityTargetOptionAndAll(t *testing.T) {
+	options := json.RawMessage(`[
+		{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+		{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},
+		{"optionId":"reject-once","name":"Reject","kind":"reject_once"}
+	]`)
+
+	t.Run("target specific permission id and select allow-always and reject", func(t *testing.T) {
+		sendSecond := make(chan struct{})
+		type outcome struct {
+			dec backend.PermissionDecision
+			err error
+		}
+		firstCh := make(chan outcome, 1)
+		h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, _ string) error {
+			go func() {
+				dec, err := backend.AskPermission(ctx, s.sink, backend.PermissionRequest{
+					Title: "first", ToolCallID: "call-1", Kind: "execute", Command: "npm test", Options: options,
+				})
+				firstCh <- outcome{dec: dec, err: err}
+			}()
+			<-sendSecond
+			secondDec, err := backend.AskPermission(ctx, s.sink, backend.PermissionRequest{
+				Title: "second", ToolCallID: "call-2", Kind: "fetch", URL: "https://example.com/hook", Options: options,
+			})
+			if err != nil {
+				return err
+			}
+			first := <-firstCh
+			if first.err != nil {
+				return first.err
+			}
+			s.sink.Event(chunk("first=" + first.dec.Option + "(" + first.dec.OptionID + ") second=" + secondDec.Option + "(" + secondDec.OptionID + ")"))
+			return nil
+		}})
+
+		run := h.launch("granular")
+		h.waitStatus(run.ID, "awaiting_permission")
+		close(sendSecond)
+		h.waitLog(run.ID, func(ev []ipc.Event) bool {
+			return countType(ev, "permission_requested") >= 2
+		})
+
+		status := h.must(ipc.Request{Method: ipc.MethodStatus, RunID: run.ID})
+		if len(status.PendingPermissions) != 2 || status.PendingPermissions[0].ID != "perm-1" || status.PendingPermissions[1].ID != "perm-2" {
+			t.Fatalf("pendingPermissions = %+v", status.PendingPermissions)
+		}
+
+		afterSecond := h.must(ipc.Request{
+			Method:       ipc.MethodApprove,
+			RunID:        run.ID,
+			PermissionID: "perm-2",
+			Option:       "allow-always",
+		})
+		if afterSecond.Status != "awaiting_permission" || len(afterSecond.PendingPermissions) != 1 || afterSecond.PendingPermission.ID != "perm-1" {
+			t.Fatalf("after answering perm-2 = %+v", afterSecond)
+		}
+
+		afterFirst := h.must(ipc.Request{
+			Method:       ipc.MethodApprove,
+			RunID:        run.ID,
+			PermissionID: "perm-1",
+			Option:       "reject",
+		})
+		if afterFirst.Status != "running" || len(afterFirst.PendingPermissions) != 0 || afterFirst.PendingPermission != nil {
+			t.Fatalf("after answering perm-1 = %+v", afterFirst)
+		}
+
+		done := h.waitStatus(run.ID, "finished")
+		if want := "first=reject_once(reject-once) second=allow_always(allow-always)"; done.Summary != want {
+			t.Fatalf("summary = %q, want %q", done.Summary, want)
+		}
+	})
+
+	t.Run("deny --all rejects every pending permission", func(t *testing.T) {
+		sendSecond := make(chan struct{})
+		firstDone := make(chan backend.PermissionDecision, 1)
+		h := newHarness(t, &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, _ string) error {
+			go func() {
+				dec, _ := backend.AskPermission(ctx, s.sink, backend.PermissionRequest{
+					Title: "first", ToolCallID: "call-1", Options: options,
+				})
+				firstDone <- dec
+			}()
+			<-sendSecond
+			secondDec, err := backend.AskPermission(ctx, s.sink, backend.PermissionRequest{
+				Title: "second", ToolCallID: "call-2", Options: options,
+			})
+			if err != nil {
+				return err
+			}
+			firstDec := <-firstDone
+			if firstDec.Approved || secondDec.Approved {
+				return errors.New("expected both denied")
+			}
+			s.sink.Event(chunk("both denied: " + firstDec.Option + "," + secondDec.Option))
+			return nil
+		}})
+
+		run := h.launch("deny-all")
+		h.waitStatus(run.ID, "awaiting_permission")
+		close(sendSecond)
+		h.waitLog(run.ID, func(ev []ipc.Event) bool {
+			return countType(ev, "permission_requested") >= 2
+		})
+
+		if _, err := h.call(ipc.Request{Method: ipc.MethodDeny, RunID: run.ID, Option: "allow-once"}); codeOf(err) != ipc.CodeInvalid {
+			t.Fatalf("deny with allow-once err = %v, want invalid", err)
+		}
+		if _, err := h.call(ipc.Request{Method: ipc.MethodDeny, RunID: run.ID, All: true, PermissionID: "perm-1"}); codeOf(err) != ipc.CodeInvalid {
+			t.Fatalf("deny with --all and permissionId err = %v, want invalid", err)
+		}
+		if _, err := h.call(ipc.Request{Method: ipc.MethodDeny, RunID: run.ID, PermissionID: "perm-99"}); codeOf(err) != ipc.CodeConflict {
+			t.Fatalf("deny unknown permissionId err = %v, want conflict", err)
+		}
+
+		answered := h.must(ipc.Request{Method: ipc.MethodDeny, RunID: run.ID, All: true})
+		if answered.Status != "running" || len(answered.PendingPermissions) != 0 {
+			t.Fatalf("after deny --all = %+v", answered)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Summary != "both denied: reject_once,reject_once" {
+			t.Fatalf("summary = %q", done.Summary)
+		}
+		if got := countType(h.logs(run.ID), "permission_answered"); got != 2 {
+			t.Fatalf("permission_answered count = %d, want 2", got)
+		}
+	})
+}
+
 func transportErrorEvent() backend.Event {
 	return backend.Event{
 		Type: backend.EventTransportError,

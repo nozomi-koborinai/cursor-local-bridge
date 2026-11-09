@@ -75,8 +75,9 @@ func newRoot(version string) *cobra.Command {
 		a.runCmd("status", "Print a run", ipc.MethodStatus),
 		a.followUpCmd(),
 		a.runCmd("stop", "Stop a run and delete its worktree; its branch stays", ipc.MethodStop),
-		a.runCmd("approve", "Approve the run's oldest pending permission", ipc.MethodApprove),
-		a.runCmd("deny", "Deny the run's oldest pending permission", ipc.MethodDeny),
+		a.permissionAnswerCmd("approve", "Approve a run's pending permission(s)", ipc.MethodApprove),
+		a.permissionAnswerCmd("deny", "Deny a run's pending permission(s)", ipc.MethodDeny),
+		a.permissionsCmd(),
 		a.listCmd(),
 		a.logsCmd(),
 		a.webhookCmd(),
@@ -223,6 +224,92 @@ func (a *app) runCmd(name, short string, method ipc.Method) *cobra.Command {
 			return a.printRun(cmd, ipc.Request{Method: method, RunID: args[0]})
 		},
 	}
+}
+
+func (a *app) permissionAnswerCmd(name, short string, method ipc.Method) *cobra.Command {
+	var (
+		permissionIDs []string
+		idAliases     []string
+		all           bool
+		option        string
+		always        bool
+		list          bool
+	)
+	cmd := &cobra.Command{
+		Use:   name + " [flags] ID [PERMISSION_ID]",
+		Short: short,
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ids := append([]string(nil), permissionIDs...)
+			ids = append(ids, idAliases...)
+			if len(args) == 2 {
+				ids = append(ids, args[1])
+			}
+			if list {
+				if len(ids) > 0 || all || option != "" || always {
+					return errors.New("invalid: --list cannot be combined with permission target or option flags")
+				}
+				return a.printPermissions(cmd, args[0])
+			}
+			if always {
+				if option != "" {
+					return errors.New("invalid: cannot combine --always with --option")
+				}
+				if method == ipc.MethodApprove {
+					option = "allow-always"
+				} else {
+					option = "reject-always"
+				}
+			}
+			if all && len(ids) > 0 {
+				return errors.New("invalid: cannot combine --all with a permission id")
+			}
+			return a.printRun(cmd, ipc.Request{
+				Method:        method,
+				RunID:         args[0],
+				PermissionIDs: ids,
+				All:           all,
+				Option:        option,
+			})
+		},
+	}
+	cmd.Flags().StringSliceVarP(&permissionIDs, "permission", "p", nil, "pending permission id to answer (default oldest)")
+	cmd.Flags().StringSliceVar(&idAliases, "id", nil, "pending permission id to answer (alias for --permission)")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "answer every pending permission on the run")
+	cmd.Flags().StringVarP(&option, "option", "o", "", "permission option to select (allow-once, allow-always, reject, or optionId)")
+	cmd.Flags().BoolVar(&always, "always", false, "select the standing allow-always or reject-always option")
+	cmd.Flags().BoolVarP(&list, "list", "l", false, "print the run's pending permissions without answering")
+	return cmd
+}
+
+func (a *app) permissionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "permissions ID",
+		Short: "Print a run's pending permissions",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.printPermissions(cmd, args[0])
+		},
+	}
+}
+
+func (a *app) printPermissions(cmd *cobra.Command, runID string) error {
+	var run *ipc.Run
+	err := a.call(cmd, ipc.Request{Method: ipc.MethodStatus, RunID: runID}, func(r ipc.Response) error {
+		run = r.Run
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return errors.New("the daemon replied without a run")
+	}
+	perms := run.PendingPermissions
+	if perms == nil {
+		perms = []ipc.Permission{}
+	}
+	return writeIndented(cmd.OutOrStdout(), perms)
 }
 
 func (a *app) listCmd() *cobra.Command {
