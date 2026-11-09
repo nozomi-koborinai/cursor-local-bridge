@@ -174,7 +174,7 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 | `clb approve ID`, `clb deny ID` | The run. |
 | `clb stop ID` | The run after removing its worktree, or an error with exit code 1 if cleanup fails. |
 | `clb logs [--follow] ID` | The run's events as NDJSON. `--follow` streams until the run is no longer active. |
-| `clb webhook setup [--test]` | `config`, `webhookHost`, `secretCreated`, and (with `--test`) `test.httpStatus`. |
+| `clb webhook setup [--test]` | `config`, `webhookHost`, `secret` (masked as `********`), `secretCreated`, and (with `--test`) `test.httpStatus`. |
 | `clb webhook test` | `httpStatus` from a test delivery (`id` and `status` set to `test`). |
 
 ### Run object
@@ -286,7 +286,7 @@ When a run enters `awaiting_permission`, the daemon sends `permissionRequested`.
 
 A reminder uses the same body with `"event": "permissionReminder"` and `"reminder": 1`.
 
-Each request includes `Content-Type: application/json`, `User-Agent: clb-webhook/1`, `X-Clb-Event` set to the payload's `event` (`statusChange`, `permissionRequested`, or `permissionReminder`), `X-Clb-Delivery: <id>`, and `X-Clb-Signature: sha256=<hex HMAC-SHA256 of raw body using webhook.secret>`, plus any custom headers in `webhook.headers`.
+Each request includes `Content-Type: application/json`, `User-Agent: clb-webhook/1`, `X-Clb-Event` set to the payload's `event` (`statusChange`, `permissionRequested`, or `permissionReminder`), `X-Clb-Delivery: <id>`, `Authorization: Bearer <webhook.secret>`, and `X-Clb-Signature: sha256=<hex HMAC-SHA256 of the raw body using webhook.secret>`, plus any custom headers in `webhook.headers`. If `webhook.headers` already sets `Authorization` to a value other than a bearer token, that value is sent instead of the bearer token. Use an `https` URL. `clb` sends the signing key in `Authorization`, so an `http` URL exposes it on the network.
 
 `clb` rejects `webhook.headers` entries with invalid HTTP header names, control characters in values, case-insensitive duplicates, or reserved names (`Content-Type`, `User-Agent`, `X-Clb-*`, `Host`, `Content-Length`, `Transfer-Encoding`).
 
@@ -308,7 +308,20 @@ ok := hmac.Equal([]byte(want), []byte(r.Header.Get("X-Clb-Signature")))
 clb webhook setup --test
 ```
 
-`clb webhook setup` prompts for the webhook URL and receiver key without echoing input (for scripts, pass `CLB_WEBHOOK_URL` and `CLB_WEBHOOK_KEY` or two lines on stdin; CLI arguments are not accepted so secrets do not appear in `ps`). It sets `webhook.url` and `Authorization: Bearer <key>`, generates a 32-byte random `webhook.secret` if none exists, preserves other fields, and atomically writes `config.json` with mode `0600`. `--test` (or `clb webhook test`) sends a test delivery and exits with code 1 if the receiver does not return 2xx.
+`clb webhook setup` prompts for the webhook URL and receiver key without echoing input (for scripts, pass `CLB_WEBHOOK_URL` and `CLB_WEBHOOK_KEY` or two lines on stdin; CLI arguments are not accepted so secrets do not appear in `ps`). It sets `webhook.url` and stores the key once in `webhook.secret` (removing any legacy `webhook.headers.Authorization` entry), preserves other fields, atomically writes `config.json` with mode `0600`, and prints the secret masked as `********`. `--test` (or `clb webhook test`) sends a test delivery and exits with code 1 if the receiver does not return 2xx.
+
+### Rotate the webhook secret
+
+1. Issue a new key at the webhook receiver.
+2. Run `clb webhook setup --test` and enter the webhook URL and the new key at the hidden prompts. For a script, set `CLB_WEBHOOK_URL` and `CLB_WEBHOOK_KEY` instead.
+3. `clb` atomically updates `webhook.secret` in `~/.clb/config.json` (mode `0600`) and verifies the new secret with a test delivery.
+4. Leave the daemon running. It reads `config.json` again on each delivery. After the test delivery succeeds, revoke the old key at the receiver.
+
+### Upgrading from 0.2
+
+A 0.2 `config.json` can store one value in `webhook.secret` and the receiver key in `webhook.headers` as `Authorization: Bearer <key>`. `clb` now keeps one credential, `webhook.secret`, and uses it both to sign the body and to send `Authorization: Bearer <webhook.secret>`.
+
+When you load a file that has both and they differ, the bearer key replaces the signing secret in memory. The file itself changes the next time you run `clb webhook setup`, which writes `webhook.secret` and drops `Authorization` from `webhook.headers`. An `Authorization` value that does not use the `Bearer` scheme stays in `webhook.headers` and is sent as-is.
 
 ## Configuration
 
@@ -324,8 +337,8 @@ clb webhook setup --test
 | `storeAllEvents` | `false` | Also store `agent_thought_chunk`, `available_commands_update`, and `thinking` events. |
 | `trustWorktree` | `false` | Pass `--trust` to `agent -p` (required for the `print` backend; see [Backends](#backends)). |
 | `webhook.url` | empty | Endpoint for run webhooks. |
-| `webhook.secret` | empty | HMAC signing secret (required when `webhook.url` is set). |
-| `webhook.headers` | empty | Extra HTTP headers sent on every webhook delivery. |
+| `webhook.secret` | empty | Single webhook secret sent as `Authorization: Bearer <secret>` and used as the HMAC signing key for `X-Clb-Signature` (required when `webhook.url` is set; always masked as `********` when displayed). |
+| `webhook.headers` | empty | Extra HTTP headers sent on every delivery. A legacy `Authorization: Bearer <key>` value is read into `webhook.secret`. Any other `Authorization` value is sent as-is and overrides the bearer token. The next `clb webhook setup` removes `Authorization` from this object. |
 | `webhook.reminder` | empty | How long a pending permission waits before each `permissionReminder`. A Go duration such as `5m`. Empty sends no reminders. |
 
 When `config.json` sets `webhook.secret` or `webhook.headers`, every `clb` command except `clb webhook setup` refuses to load it if group or other users have any permissions on the file; run `chmod 600 ~/.clb/config.json` to fix it.

@@ -2,9 +2,10 @@ package config
 
 import (
 	"bytes"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -72,7 +73,7 @@ func TestLoadFullFile(t *testing.T) {
 		Model:          "composer",
 		SocketPath:     "/tmp/clb.sock",
 		WorktreeDir:    "/tmp/worktrees",
-		Webhook:        Webhook{URL: "https://example.com/hook", Secret: "s3cret"},
+		Webhook:        Webhook{URL: "https://example.com/hook", Secret: NewSecret("s3cret")},
 		StoreAllEvents: true,
 		TrustWorktree:  true,
 	}
@@ -84,38 +85,181 @@ func TestLoadFullFile(t *testing.T) {
 	}
 }
 
-func TestLoadWebhookHeaders(t *testing.T) {
-	home := testHome(t)
-	writeConfig(t, home, `{
-		"webhook": {
-			"url": "https://example.com/hook",
-			"secret": "s3cret",
-			"headers": {"Authorization": "Bearer k", "X-Automation-Key": "k"}
-		}
-	}`)
-	got, err := Load(home)
-	if err != nil {
-		t.Fatal(err)
+func TestLoadWebhookHeadersAndLegacyMigration(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantURL     string
+		wantSecret  string
+		wantHeaders map[string]string
+	}{
+		{
+			name:        "canonical secret and custom headers",
+			body:        `{"webhook":{"url":"https://example.com/hook","secret":"s3cret","headers":{"X-Automation-Key":"k"}}}`,
+			wantURL:     "https://example.com/hook",
+			wantSecret:  "s3cret",
+			wantHeaders: map[string]string{"X-Automation-Key": "k"},
+		},
+		{
+			name:        "legacy both secret and Authorization with same value",
+			body:        `{"webhook":{"url":"https://example.com/hook","secret":"s3cret","headers":{"Authorization":"Bearer s3cret","X-Automation-Key":"k"}}}`,
+			wantURL:     "https://example.com/hook",
+			wantSecret:  "s3cret",
+			wantHeaders: map[string]string{"X-Automation-Key": "k"},
+		},
+		{
+			name:        "legacy both secret and Authorization with different values picks Authorization key",
+			body:        `{"webhook":{"url":"https://example.com/hook","secret":"random-generated-hex","headers":{"Authorization":"Bearer receiver-key"}}}`,
+			wantURL:     "https://example.com/hook",
+			wantSecret:  "receiver-key",
+			wantHeaders: nil,
+		},
+		{
+			name:        "legacy Authorization only satisfies url secret requirement",
+			body:        `{"webhook":{"url":"https://example.com/hook","headers":{"authorization":"bEaReR legacy-only-key"}}}`,
+			wantURL:     "https://example.com/hook",
+			wantSecret:  "legacy-only-key",
+			wantHeaders: nil,
+		},
+		{
+			name:        "legacy Authorization without url",
+			body:        `{"webhook":{"headers":{"Authorization":"Bearer only"}}}`,
+			wantURL:     "",
+			wantSecret:  "only",
+			wantHeaders: nil,
+		},
+		{
+			name:        "non-bearer authorization stays an override",
+			body:        `{"webhook":{"url":"https://example.com/hook","secret":"s3cret","headers":{"Authorization":"Basic basic-token","X-Custom":"keep"}}}`,
+			wantURL:     "https://example.com/hook",
+			wantSecret:  "s3cret",
+			wantHeaders: map[string]string{"Authorization": "Basic basic-token", "X-Custom": "keep"},
+		},
+		{
+			name:        "token scheme without a secret stays empty",
+			body:        `{"webhook":{"headers":{"Authorization":"Token raw-token"}}}`,
+			wantURL:     "",
+			wantSecret:  "",
+			wantHeaders: map[string]string{"Authorization": "Token raw-token"},
+		},
 	}
-	want := map[string]string{"Authorization": "Bearer k", "X-Automation-Key": "k"}
-	if !reflect.DeepEqual(got.Webhook.Headers, want) {
-		t.Fatalf("headers = %#v", got.Webhook.Headers)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := testHome(t)
+			writeConfig(t, home, tt.body)
+			path := filepath.Join(home, "config.json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := Load(home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("Load rewrote config.json:\n%s", after)
+			}
+			if got.Webhook.URL != tt.wantURL {
+				t.Fatalf("url = %q, want %q", got.Webhook.URL, tt.wantURL)
+			}
+			if got.Webhook.Secret.Reveal() != tt.wantSecret {
+				t.Fatalf("secret = %q, want %q", got.Webhook.Secret.Reveal(), tt.wantSecret)
+			}
+			if !reflect.DeepEqual(got.Webhook.Headers, tt.wantHeaders) {
+				t.Fatalf("headers = %#v, want %#v", got.Webhook.Headers, tt.wantHeaders)
+			}
+		})
 	}
-	if got.Webhook.URL != "https://example.com/hook" || got.Webhook.Secret != "s3cret" {
-		t.Fatalf("webhook = %+v", got.Webhook)
+}
+
+func TestSecretAndConfigMasking(t *testing.T) {
+	const (
+		rawSecret = "super-secret-webhook-key-999"
+		rawHeader = "custom-header-secret-777"
+		userinfo  = "userinfo-token-111"
+		query     = "query-token-222"
+	)
+	cfg := Config{
+		Home:        "/path/to/home",
+		AgentPath:   "agent",
+		Backend:     backend.ACP,
+		SocketPath:  "/path/to/home/clb.sock",
+		WorktreeDir: "/path/to/home/worktrees",
+		Webhook: Webhook{
+			URL:     "https://user:" + userinfo + "@example.com/hook?q=" + query,
+			Secret:  NewSecret(rawSecret),
+			Headers: map[string]string{"X-Custom": rawHeader},
+		},
 	}
 
-	home = testHome(t)
-	writeConfig(t, home, `{"webhook":{"headers":{"Authorization":"Bearer only"}}}`)
-	got, err = Load(home)
+	type unexportedHolder struct {
+		secret Secret
+		hook   Webhook
+	}
+	holder := unexportedHolder{secret: cfg.Webhook.Secret, hook: cfg.Webhook}
+
+	secretMap := map[string]Secret{"k": cfg.Webhook.Secret}
+	hookMap := map[string]Webhook{"k": cfg.Webhook}
+	var slogTextBuf, slogJSONBuf bytes.Buffer
+	slog.New(slog.NewTextHandler(&slogTextBuf, nil)).Info("cfg", "secret", cfg.Webhook.Secret, "webhook", cfg.Webhook, "cfg", cfg, "secretMap", secretMap, "hookMap", hookMap)
+	slog.New(slog.NewJSONHandler(&slogJSONBuf, nil)).Info("cfg", "secret", cfg.Webhook.Secret, "webhook", cfg.Webhook, "cfg", cfg, "secretMap", secretMap, "hookMap", hookMap)
+
+	cfgJSON, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Webhook.URL != "" || got.Webhook.Secret != "" {
-		t.Fatalf("webhook = %+v", got.Webhook)
+	hookJSON, err := json.Marshal(cfg.Webhook)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got.Webhook.Headers, map[string]string{"Authorization": "Bearer only"}) {
-		t.Fatalf("headers = %#v", got.Webhook.Headers)
+
+	outputs := map[string]string{
+		"Secret.String":      cfg.Webhook.Secret.String(),
+		"Secret.GoString":    cfg.Webhook.Secret.GoString(),
+		"Secret.%v":          fmt.Sprintf("%v", cfg.Webhook.Secret),
+		"Secret.%+v":         fmt.Sprintf("%+v", cfg.Webhook.Secret),
+		"Secret.%#v":         fmt.Sprintf("%#v", cfg.Webhook.Secret),
+		"Secret.%s":          fmt.Sprintf("%s", cfg.Webhook.Secret),
+		"Secret.%q":          fmt.Sprintf("%q", cfg.Webhook.Secret),
+		"Webhook.%v":         fmt.Sprintf("%v", cfg.Webhook),
+		"Webhook.%+v":        fmt.Sprintf("%+v", cfg.Webhook),
+		"Webhook.%#v":        fmt.Sprintf("%#v", cfg.Webhook),
+		"Config.%v":          fmt.Sprintf("%v", cfg),
+		"Config.%+v":         fmt.Sprintf("%+v", cfg),
+		"Config.%#v":         fmt.Sprintf("%#v", cfg),
+		"unexported.secret":  fmt.Sprintf("%v %+v %#v %s %q", holder.secret, holder, holder, holder.secret, holder.secret),
+		"map.secret":         fmt.Sprintf("%v %+v %#v %s %q", secretMap, secretMap, secretMap, secretMap, secretMap),
+		"map.webhook":        fmt.Sprintf("%v %+v %#v %s %q", hookMap, hookMap, hookMap, hookMap, hookMap),
+		"Config.MarshalJSON": string(cfgJSON),
+		"Webhook.Marshal":    string(hookJSON),
+		"slog.Text":          slogTextBuf.String(),
+		"slog.JSON":          slogJSONBuf.String(),
+	}
+
+	for name, out := range outputs {
+		if strings.Contains(out, rawSecret) {
+			t.Errorf("%s leaked raw secret: %s", name, out)
+		}
+		if name == "unexported.secret" {
+			continue
+		}
+		for _, leak := range []string{rawHeader, userinfo, query, "/hook"} {
+			if strings.Contains(out, leak) {
+				t.Errorf("%s leaked %q: %s", name, leak, out)
+			}
+		}
+		if !strings.Contains(out, MaskedSecret) {
+			t.Errorf("%s did not include mask %q: %s", name, MaskedSecret, out)
+		}
+	}
+
+	var empty Secret
+	if empty.String() != "" || empty.Mask() != "" || !empty.IsZero() || empty.Reveal() != "" {
+		t.Fatalf("empty secret = %+v", empty)
 	}
 }
 
@@ -172,7 +316,7 @@ func TestLoadReminder(t *testing.T) {
 func TestSaveWebhookKeepsReminder(t *testing.T) {
 	home := testHome(t)
 	writeConfig(t, home, `{
-  "webhook": {"url": "https://example.com/old", "secret": "keep-this-secret", "reminder": "5m"}
+  "webhook": {"url": "https://example.com/old", "secret": "old-secret", "reminder": "5m"}
 }`)
 	if _, err := SaveWebhook(home, "https://example.com/hook", "Bearer key"); err != nil {
 		t.Fatal(err)
@@ -181,7 +325,7 @@ func TestSaveWebhookKeepsReminder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Webhook.Reminder != "5m" || got.Webhook.URL != "https://example.com/hook" || got.Webhook.Secret != "keep-this-secret" {
+	if got.Webhook.Reminder != "5m" || got.Webhook.URL != "https://example.com/hook" || got.Webhook.Secret.Reveal() != "key" {
 		t.Fatalf("webhook = %+v", got.Webhook)
 	}
 }
@@ -217,6 +361,10 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{name: "unknown webhook field", body: `{"webhook":{"nope":true}}`, want: "nope"},
 		{name: "bad backend", body: `{"backend":"ssh"}`, want: "backend"},
 		{name: "url without secret", body: `{"webhook":{"url":"https://example.com/hook"}}`, want: "webhook.secret"},
+		{name: "masked placeholder secret", body: `{"webhook":{"url":"https://example.com/hook","secret":"********"}}`, want: "webhook.secret"},
+		{name: "control char in secret", body: "{\"webhook\":{\"url\":\"https://example.com/hook\",\"secret\":\"ctrl-value-999\\u0000tail\"}}", want: "webhook.secret"},
+		{name: "duplicate authorization", body: `{"webhook":{"headers":{"Authorization":"Bearer alpha-token-111","authorization":"Bearer beta-token-222"}}}`, want: `headers "Authorization" and "authorization" name the same header`},
+		{name: "basic auth is not a secret", body: `{"webhook":{"url":"https://example.com/hook","headers":{"Authorization":"Basic basic-token"}}}`, want: "webhook.secret"},
 		{name: "ftp url", body: `{"webhook":{"url":"ftp://example.com/hook","secret":"x"}}`, want: "webhook.url"},
 		{name: "url without host", body: `{"webhook":{"url":"https://","secret":"x"}}`, want: "webhook.url"},
 		{name: "bad reminder", body: `{"webhook":{"reminder":"soon"}}`, want: "webhook.reminder"},
@@ -235,6 +383,11 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 			file := filepath.Join(home, "config.json")
 			if !strings.Contains(msg, file) || !strings.Contains(msg, tt.want) {
 				t.Fatalf("err = %v", err)
+			}
+			for _, leak := range []string{"ctrl-value-999", "alpha-token-111", "beta-token-222", "basic-token", MaskedSecret} {
+				if strings.Contains(msg, leak) {
+					t.Fatalf("err includes %q: %v", leak, err)
+				}
 			}
 		})
 	}
@@ -333,7 +486,7 @@ func TestSaveWebhookCreatesHome(t *testing.T) {
 		url = "https://example.com/hook?a=1&b=2"
 	)
 	home := filepath.Join(testHome(t), "missing")
-	created, err := SaveWebhook(home, url, "Bearer "+key)
+	created, err := SaveWebhook(home, url, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,18 +504,18 @@ func TestSaveWebhookCreatesHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Webhook.URL != url || got.Webhook.Headers["Authorization"] != "Bearer "+key {
+	if got.Webhook.URL != url || got.Webhook.Secret.Reveal() != key || len(got.Webhook.Headers) != 0 {
 		t.Fatalf("webhook = %+v", got.Webhook)
-	}
-	if !is64Hex(got.Webhook.Secret) {
-		t.Fatalf("secret = %q", got.Webhook.Secret)
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(body, []byte("agentPath")) || bytes.Contains(body, []byte("socketPath")) || bytes.Contains(body, []byte("worktreeDir")) || bytes.Contains(body, []byte(`\u0026`)) {
+	if bytes.Contains(body, []byte("agentPath")) || bytes.Contains(body, []byte("socketPath")) || bytes.Contains(body, []byte("worktreeDir")) || bytes.Contains(body, []byte("headers")) || bytes.Contains(body, []byte("Authorization")) || bytes.Contains(body, []byte(`\u0026`)) {
 		t.Fatalf("file =\n%s", body)
+	}
+	if gotCount := bytes.Count(body, []byte(key)); gotCount != 1 {
+		t.Fatalf("secret occurrences in config.json = %d, want 1:\n%s", gotCount, body)
 	}
 
 	again, err := SaveWebhook(home, url, "Bearer "+key)
@@ -381,10 +534,10 @@ func TestSaveWebhookCreatesHome(t *testing.T) {
 	}
 }
 
-func TestSaveWebhookKeepsExistingFields(t *testing.T) {
+func TestSaveWebhookKeepsExistingFieldsAndMigratesLegacyHeaders(t *testing.T) {
 	const (
 		key    = "new-key"
-		secret = "keep-this-secret"
+		secret = "old-secret"
 		url    = "https://example.com/hook?a=1&b=2"
 	)
 	home := testHome(t)
@@ -418,10 +571,9 @@ func TestSaveWebhookKeepsExistingFields(t *testing.T) {
   "storeAllEvents": true,
   "webhook": {
     "headers": {
-      "Authorization": "Bearer new-key",
       "X-Custom": "keep-me"
     },
-    "secret": "keep-this-secret",
+    "secret": "new-key",
     "url": "https://example.com/hook?a=1&b=2"
   }
 }
@@ -440,15 +592,15 @@ func TestSaveWebhookKeepsExistingFields(t *testing.T) {
 	if got.AgentPath != "/opt/agent" || got.Backend != backend.Print || got.Model != "composer" || !got.StoreAllEvents {
 		t.Fatalf("cfg = %+v", got)
 	}
-	if got.Webhook.Secret != secret || got.Webhook.URL != url {
+	if got.Webhook.Secret.Reveal() != key || got.Webhook.URL != url {
 		t.Fatalf("webhook = %+v", got.Webhook)
 	}
-	wantHeaders := map[string]string{"Authorization": "Bearer " + key, "X-Custom": "keep-me"}
+	wantHeaders := map[string]string{"X-Custom": "keep-me"}
 	if !reflect.DeepEqual(got.Webhook.Headers, wantHeaders) {
 		t.Fatalf("headers = %#v", got.Webhook.Headers)
 	}
 
-	again, err := SaveWebhook(home, url, "Bearer "+key)
+	again, err := SaveWebhook(home, url, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +613,32 @@ func TestSaveWebhookKeepsExistingFields(t *testing.T) {
 	}
 	if !bytes.Equal(body, second) {
 		t.Fatalf("second write =\n%s", second)
+	}
+}
+
+func TestSaveWebhookDropsHeadersWhenOnlyAuthorizationExisted(t *testing.T) {
+	home := testHome(t)
+	writeConfig(t, home, `{"webhook":{"url":"https://example.com/hook","headers":{"Authorization":"Bearer legacy-key"}}}`)
+	created, err := SaveWebhook(home, "https://example.com/hook", "rotated-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("secretCreated = true when legacy Authorization already existed")
+	}
+	body, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "webhook": {
+    "secret": "rotated-key",
+    "url": "https://example.com/hook"
+  }
+}
+`
+	if string(body) != want {
+		t.Fatalf("file =\n%s\nwant =\n%s", body, want)
 	}
 }
 
@@ -490,7 +668,7 @@ func TestSaveWebhookRejectsAndLeavesTheFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = SaveWebhook(home, tt.url, "Bearer "+key)
+			_, err = SaveWebhook(home, tt.url, key)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -513,21 +691,13 @@ func TestSaveWebhookRejectsAndLeavesTheFile(t *testing.T) {
 	}
 	t.Run("missing home", func(t *testing.T) {
 		home := filepath.Join(testHome(t), "missing")
-		if _, err := SaveWebhook(home, "ftp://example.com/hook", "Bearer "+key); err == nil {
+		if _, err := SaveWebhook(home, "ftp://example.com/hook", key); err == nil {
 			t.Fatal("expected error")
 		}
 		if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("home after a rejected save: %v", err)
 		}
 	})
-}
-
-func is64Hex(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	raw, err := hex.DecodeString(s)
-	return err == nil && len(raw) == 32
 }
 
 func assertMode(t *testing.T, path string, mode os.FileMode) {
@@ -607,9 +777,8 @@ func TestLoadRefusesLooseWebhookFile(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := map[string]string{"Authorization": "Bearer " + value}
-		if !reflect.DeepEqual(got.Webhook.Headers, want) {
-			t.Fatalf("headers = %#v", got.Webhook.Headers)
+		if got.Webhook.Secret.Reveal() != value || len(got.Webhook.Headers) != 0 {
+			t.Fatalf("webhook = %+v", got.Webhook)
 		}
 	})
 

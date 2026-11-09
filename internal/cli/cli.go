@@ -161,7 +161,7 @@ func newSender(w config.Webhook) *webhook.Sender {
 	}
 	return &webhook.Sender{
 		URL:      w.URL,
-		Secret:   []byte(w.Secret),
+		Secret:   []byte(w.Secret.Reveal()),
 		Header:   hdr,
 		Client:   &http.Client{Timeout: 10 * time.Second},
 		Backoff:  time.Second,

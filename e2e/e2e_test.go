@@ -48,9 +48,6 @@ func TestCLB(t *testing.T) {
 		"webhook": map[string]any{
 			"url":    hooks.url,
 			"secret": secret,
-			"headers": map[string]string{
-				"Authorization": "Bearer e2e-sender-key",
-			},
 		},
 	})
 	state := t.TempDir()
@@ -106,8 +103,8 @@ func TestCLB(t *testing.T) {
 	step("a signed webhook reports the finish", func(t *testing.T) {
 		d := hooks.wait(t, hello.ID, "finished", 1)[0]
 		checkSigned(t, d)
-		if got := d.header.Get("Authorization"); got != "Bearer e2e-sender-key" {
-			t.Errorf("Authorization = %q, want %q", got, "Bearer e2e-sender-key")
+		if got := d.header.Get("Authorization"); got != "Bearer "+secret {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer "+secret)
 		}
 		if got := d.header.Get("X-Clb-Event"); got != "statusChange" {
 			t.Errorf("X-Clb-Event = %q, want statusChange", got)
