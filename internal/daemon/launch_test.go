@@ -290,4 +290,43 @@ func TestLaunchRecordsAndDisplaysRequestedModelLabel(t *testing.T) {
 			t.Fatalf("finished model = %q, want %q", done.Model, requested)
 		}
 	})
+
+	t.Run("followup after daemon restart preserves requested startup model", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{"selectedModel":{"modelId":"grok-4.7","parameters":[{"id":"reasoning_effort","value":"high"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const reported = "Claude 4 Sonnet"
+		agent := &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, prompt string) error {
+			if mr, ok := s.sink.(backend.ModelReporter); ok {
+				mr.SetModel(reported)
+			}
+			return echo(ctx, s, prompt)
+		}}
+		h := newHarness(t, agent)
+
+		unflagged := h.launch("first")
+		h.waitStatus(unflagged.ID, "finished")
+		if opts := h.agent.session(0).startOptions(); opts.Model != "" {
+			t.Fatalf("initial start options model = %q, want empty", opts.Model)
+		}
+
+		h.stop()
+		d := h.newDaemon()
+		if err := d.Recover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		h.serve(d)
+
+		h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: unflagged.ID, Prompt: "second"})
+		done := h.waitStatus(unflagged.ID, "finished")
+		if done.Model != reported {
+			t.Fatalf("resumed model = %q, want %q", done.Model, reported)
+		}
+		if opts := h.agent.session(1).startOptions(); opts.Model != "" {
+			t.Fatalf("resumed start options model after restart = %q, want empty", opts.Model)
+		}
+	})
 }

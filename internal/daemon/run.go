@@ -123,14 +123,12 @@ type actor struct {
 	gen *generation
 	// closing is the last closed generation. Its agent may still be
 	// shutting down.
-	closing        *generation
-	state          lifecycle.State
-	stall          *time.Timer
-	launched       bool
-	requestedModel string
-	perms          int
-	permRetries    map[string]int
-	carried        []store.NewEvent
+	closing     *generation
+	state       lifecycle.State
+	stall       *time.Timer
+	perms       int
+	permRetries map[string]int
+	carried     []store.NewEvent
 }
 
 // generation is one agent session of a run. Everything a session reports
@@ -221,9 +219,7 @@ func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
 	}
 }
 
-func (a *actor) create(run store.Run, requestedModel string, effects []lifecycle.Effect) error {
-	a.launched = true
-	a.requestedModel = requestedModel
+func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
 	if err := a.d.store.CreateRun(a.d.writes, run); err != nil {
 		return err
 	}
@@ -446,11 +442,8 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.sweeper = g
 	a.sweepMu.Unlock()
 
-	model := run.Model
-	if a.launched {
-		model = a.requestedModel
-	}
-	opts := backend.StartOptions{Dir: run.Worktree, Model: model}
+	requested, _ := splitRunModel(run.Model)
+	opts := backend.StartOptions{Dir: run.Worktree, Model: requested}
 	if resume {
 		opts.ResumeSessionID = run.SessionID
 	}
@@ -485,7 +478,7 @@ func (a *actor) started(g *generation, sessionID string, err error) {
 	a.record(lifecycle.Started{}, func(r *store.Run) {
 		r.SessionID = sessionID
 		if g.model != "" {
-			r.Model = a.mergeModel(r.Model, g.model)
+			r.Model = mergeRunModel(r.Model, g.model)
 		}
 	})
 }
@@ -497,7 +490,7 @@ func (a *actor) setModel(g *generation, model string) {
 		a.d.log.Error("get run for model update", "run", a.id, "err", err)
 		return
 	}
-	next := a.mergeModel(run.Model, model)
+	next := mergeRunModel(run.Model, model)
 	if next == run.Model {
 		return
 	}
@@ -508,24 +501,36 @@ func (a *actor) setModel(g *generation, model string) {
 	}
 }
 
-func (a *actor) mergeModel(current, reported string) string {
-	reported = strings.TrimSpace(reported)
+func encodeRunModel(requested, display string) string {
+	if requested == display {
+		return display
+	}
+	return requested + "\n" + display
+}
+
+func splitRunModel(stored string) (requested, display string) {
+	if req, disp, ok := strings.Cut(stored, "\n"); ok {
+		return req, disp
+	}
+	return stored, stored
+}
+
+func mergeRunModel(stored, reported string) string {
+	reported = cleanModel(reported)
 	if reported == "" {
-		return current
+		return stored
 	}
-	if a.launched && a.requestedModel == "" {
-		if !strings.Contains(reported, "[") && strings.HasPrefix(current, reported+"[") {
-			return current
+	requested, display := splitRunModel(stored)
+	if requested == "" {
+		if !strings.Contains(reported, "[") && strings.HasPrefix(display, reported+"[") {
+			return encodeRunModel(requested, display)
 		}
-		return reported
+		return encodeRunModel(requested, reported)
 	}
-	if current == "" {
-		return reported
+	if !strings.Contains(requested, "[") && strings.HasPrefix(reported, requested+"[") {
+		return encodeRunModel(requested, reported)
 	}
-	if !strings.Contains(current, "[") && strings.HasPrefix(reported, current+"[") {
-		return reported
-	}
-	return current
+	return encodeRunModel(requested, display)
 }
 
 func (a *actor) sendPrompt(prompt string) {
