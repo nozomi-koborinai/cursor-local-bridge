@@ -9,9 +9,20 @@ linters:
   enable:
     - bodyclose
     - errorlint
+    - forbidigo
     - misspell
     - nolintlint
     - unconvert
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: 'proc\.Start\b'
+          msg: start agent processes with backend.StartAgent
+  exclusions:
+    rules:
+      - path: internal/backend/agent\.go
+        linters:
+          - forbidigo
 
 formatters:
   enable:

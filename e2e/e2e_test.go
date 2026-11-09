@@ -70,6 +70,9 @@ func TestCLB(t *testing.T) {
 		if hello.Summary != "echo: hello" || hello.Model != "grok-4.6[effort=high,fast=false]" {
 			t.Errorf("finished run = %+v, want summary %q and model %q", hello, "echo: hello", "grok-4.6[effort=high,fast=false]")
 		}
+		if hello.AgentVersion != "2026.01.01-fake" {
+			t.Errorf("agentVersion = %q, want 2026.01.01-fake", hello.AgentVersion)
+		}
 	})
 
 	step("logs show the streamed events", func(t *testing.T) {
@@ -112,7 +115,10 @@ func TestCLB(t *testing.T) {
 		if d.header.Get("X-Clb-Delivery") == "" {
 			t.Error("X-Clb-Delivery is empty")
 		}
-		want := payload{Event: "statusChange", ID: hello.ID, Status: "finished", Repo: repo, Branch: hello.Branch, Summary: "echo: hello"}
+		want := payload{
+			Event: "statusChange", ID: hello.ID, Status: "finished", Repo: repo, Branch: hello.Branch,
+			AgentVersion: "2026.01.01-fake", Summary: "echo: hello",
+		}
 		if d.payload != want {
 			t.Errorf("payload = %+v, want %+v", d.payload, want)
 		}
@@ -299,6 +305,75 @@ func TestCLB(t *testing.T) {
 			t.Errorf("wip.txt in worktree = %q, %v", b, err)
 		}
 		checkSigned(t, hooks.wait(t, launched.ID, "finished", 1)[0])
+	})
+
+	step("a crash records stderr, the version, and the failure", func(t *testing.T) {
+		launched := c.run(t, "launch", "--repo", repo, "[crash] now")
+		failed := c.waitStatus(t, launched.ID, "failed")
+		if failed.AgentVersion != "2026.01.01-fake" {
+			t.Errorf("agentVersion = %q", failed.AgentVersion)
+		}
+		if !strings.Contains(failed.Error, "exit status 3") || !strings.Contains(failed.Error, "crashing on purpose") {
+			t.Errorf("error = %q", failed.Error)
+		}
+		text := string(c.output(t, "", "status", "-o", "text", failed.ID))
+		for _, want := range []string{failed.ID, "failed", failed.AgentVersion, "crashing on purpose", "clb logs --type stderr " + failed.ID} {
+			if !strings.Contains(text, want) {
+				t.Errorf("status -o text missing %q:\n%s", want, text)
+			}
+		}
+		stderrEvents := parseEvents(t, c.output(t, "", "logs", "--type", "stderr", failed.ID))
+		if len(stderrEvents) == 0 {
+			t.Fatal("clb logs --type stderr printed nothing")
+		}
+		var saw bool
+		for _, e := range stderrEvents {
+			if e.Type != "stderr" {
+				t.Errorf("filtered log included type %s", e.Type)
+			}
+			if strings.Contains(string(e.Data), "crashing on purpose") {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("stderr events did not include the crash line: %s", c.output(t, "", "logs", "--type", "stderr", failed.ID))
+		}
+		followed := c.output(t, "", "logs", "--follow", "--type", "stderr", failed.ID)
+		if !bytes.Contains(followed, []byte("crashing on purpose")) {
+			t.Errorf("--follow --type stderr =\n%s", followed)
+		}
+		body := hooks.wait(t, failed.ID, "failed", 1)[0]
+		checkSigned(t, body)
+		if body.payload.Error != failed.Error || body.payload.AgentVersion != failed.AgentVersion {
+			t.Errorf("webhook = %+v, want error %q and version %q", body.payload, failed.Error, failed.AgentVersion)
+		}
+	})
+
+	step("a stderr prompt is logged and the turn still finishes", func(t *testing.T) {
+		launched := c.run(t, "launch", "--repo", repo, "[stderr] hello")
+		done := c.waitStatus(t, launched.ID, "finished")
+		if done.Summary != "echo: [stderr] hello" || done.AgentVersion != "2026.01.01-fake" {
+			t.Errorf("run summary %q version %q", done.Summary, done.AgentVersion)
+		}
+		events := parseEvents(t, c.output(t, "", "logs", "--type", "stderr", done.ID))
+		var lines []string
+		for _, e := range events {
+			if e.Type != "stderr" {
+				t.Errorf("filtered log included type %s", e.Type)
+			}
+			var d struct {
+				Line string `json:"line"`
+			}
+			decode(t, e.Data, &d)
+			lines = append(lines, d.Line)
+		}
+		if len(lines) < 3 || lines[0] != "diag: [stderr] hello" || len(lines[1]) != 4<<10 || lines[2] != "x" {
+			t.Fatalf("stderr lines = %#v", lines)
+		}
+		procs := parseEvents(t, c.output(t, "", "logs", "--type", "agent_process", done.ID))
+		if len(procs) != 1 || !strings.Contains(string(procs[0].Data), `"version":"2026.01.01-fake"`) {
+			t.Fatalf("agent_process events = %+v", procs)
+		}
 	})
 
 	step("SIGTERM stops the daemon cleanly", func(t *testing.T) {
@@ -628,15 +703,16 @@ func startDaemon(t *testing.T, c *clb, stateDir string) *process {
 }
 
 type payload struct {
-	Event      string    `json:"event"`
-	ID         string    `json:"id"`
-	Status     string    `json:"status"`
-	Repo       string    `json:"repo"`
-	Branch     string    `json:"branch"`
-	Summary    string    `json:"summary"`
-	Error      string    `json:"error"`
-	Permission *permBody `json:"permission"`
-	Reminder   int       `json:"reminder"`
+	Event        string    `json:"event"`
+	ID           string    `json:"id"`
+	Status       string    `json:"status"`
+	Repo         string    `json:"repo"`
+	Branch       string    `json:"branch"`
+	AgentVersion string    `json:"agentVersion"`
+	Summary      string    `json:"summary"`
+	Error        string    `json:"error"`
+	Permission   *permBody `json:"permission"`
+	Reminder     int       `json:"reminder"`
 }
 
 type permBody struct {

@@ -275,7 +275,7 @@ func (a *app) permissionAnswerCmd(name, short string, method ipc.Method) *cobra.
 				PermissionIDs: ids,
 				All:           all,
 				Option:        option,
-			})
+			}, outputJSON)
 		},
 	}
 	cmd.Flags().StringSliceVarP(&permissionIDs, "permission", "p", nil, "pending permission id to answer (default oldest)")

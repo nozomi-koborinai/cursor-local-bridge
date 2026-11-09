@@ -49,7 +49,6 @@ type recorder struct {
 	events []backend.Event
 	procs  []backend.AgentProcess
 	lines  []backend.Stderr
-	order  []string
 	model  string
 }
 
@@ -75,14 +74,12 @@ func (r *recorder) AgentProcess(p backend.AgentProcess) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.procs = append(r.procs, p)
-	r.order = append(r.order, "process")
 }
 
 func (r *recorder) Stderr(l backend.Stderr) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lines = append(r.lines, l)
-	r.order = append(r.order, "stderr")
 }
 
 func (r *recorder) Permission(context.Context, backend.PermissionRequest) (bool, error) {
@@ -106,12 +103,6 @@ func (r *recorder) stderr() []backend.Stderr {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]backend.Stderr(nil), r.lines...)
-}
-
-func (r *recorder) reportOrder() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.order...)
 }
 
 func (r *recorder) types() []string {

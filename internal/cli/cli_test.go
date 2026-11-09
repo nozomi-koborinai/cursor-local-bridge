@@ -117,7 +117,7 @@ func TestWriteRunJSONKeepsTheIndentedObject(t *testing.T) {
 }
 
 func TestOutputFlagRejectsUnknownFormat(t *testing.T) {
-	var f outputFormat = outputJSON
+	f := outputJSON
 	if err := f.Set("text"); err != nil || f != outputText {
 		t.Fatalf("Set(text) = %v, format %q", err, f)
 	}
