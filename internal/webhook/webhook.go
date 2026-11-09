@@ -125,16 +125,17 @@ type Permission struct {
 
 // Payload is the JSON body of a webhook request.
 type Payload struct {
-	Event      string      `json:"event"`
-	Timestamp  time.Time   `json:"timestamp"`
-	RunID      string      `json:"id"`
-	Status     string      `json:"status"`
-	Repo       string      `json:"repo"`
-	Branch     string      `json:"branch"`
-	Summary    string      `json:"summary,omitempty"`
-	Error      string      `json:"error,omitempty"`
-	Permission *Permission `json:"permission,omitempty"`
-	Reminder   int         `json:"reminder,omitempty"`
+	Event        string      `json:"event"`
+	Timestamp    time.Time   `json:"timestamp"`
+	RunID        string      `json:"id"`
+	Status       string      `json:"status"`
+	Repo         string      `json:"repo"`
+	Branch       string      `json:"branch"`
+	AgentVersion string      `json:"agentVersion,omitempty"`
+	Summary      string      `json:"summary,omitempty"`
+	Error        string      `json:"error,omitempty"`
+	Permission   *Permission `json:"permission,omitempty"`
+	Reminder     int         `json:"reminder,omitempty"`
 }
 
 // Sign returns the SignatureHeader value for body.

@@ -502,13 +502,13 @@ func resolvePermissionAnswer(p Permission, approve bool, rawOption string) (Answ
 		}
 	}
 	return AnswerPermission{}, fmt.Errorf("%w: permission %q does not offer option %q", ErrNotAllowed, p.ID, rawOption)
-=======
+}
+
 func reason(err string) string {
 	if strings.TrimSpace(err) == "" {
 		return noReason
 	}
 	return err
->>>>>>> d00085a (feat(lifecycle): give every failed run an error message)
 }
 
 func notAllowed(action string, s State) error {

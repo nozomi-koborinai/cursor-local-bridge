@@ -46,14 +46,15 @@ func TestVerifyRejectsTampering(t *testing.T) {
 func TestSendPostsSignedPayload(t *testing.T) {
 	secret := []byte("topsecret")
 	payload := Payload{
-		Event:     EventStatusChange,
-		Timestamp: time.Date(2026, 11, 7, 8, 0, 0, 123, time.UTC),
-		RunID:     "run-1",
-		Status:    "finished",
-		Repo:      "/repo",
-		Branch:    "clb/run-1",
-		Summary:   "done",
-		Error:     "none",
+		Event:        EventStatusChange,
+		Timestamp:    time.Date(2026, 11, 7, 8, 0, 0, 123, time.UTC),
+		RunID:        "run-1",
+		Status:       "finished",
+		Repo:         "/repo",
+		Branch:       "clb/run-1",
+		AgentVersion: "2026.01.01-fake",
+		Summary:      "done",
+		Error:        "none",
 	}
 	var (
 		mu   sync.Mutex
@@ -115,6 +116,7 @@ func TestSendPostsSignedPayload(t *testing.T) {
 	}
 	if decoded.Event != payload.Event || decoded.RunID != payload.RunID || decoded.Status != payload.Status ||
 		decoded.Repo != payload.Repo || decoded.Branch != payload.Branch ||
+		decoded.AgentVersion != payload.AgentVersion ||
 		decoded.Summary != payload.Summary || decoded.Error != payload.Error ||
 		!decoded.Timestamp.Equal(payload.Timestamp) {
 		t.Fatalf("payload = %+v", decoded)
