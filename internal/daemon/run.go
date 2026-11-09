@@ -22,6 +22,7 @@ const (
 	eventPrompt              = "prompt"
 	eventPermissionRequested = "permission_requested"
 	eventPermissionAnswered  = "permission_answered"
+	eventPermissionCancelled = "permission_cancelled"
 	eventWebhook             = "webhook"
 )
 
@@ -48,10 +49,60 @@ type permissionAnsweredData struct {
 	Approved bool   `json:"approved"`
 }
 
+type permissionCancelledData struct {
+	ID           string `json:"id"`
+	Reason       string `json:"reason"`
+	SupersededBy string `json:"supersededBy,omitempty"`
+}
+
 type webhookData struct {
-	Status    string `json:"status"`
-	Delivered bool   `json:"delivered"`
-	Error     string `json:"error,omitempty"`
+	Event      string `json:"event,omitempty"`
+	Status     string `json:"status"`
+	Permission string `json:"permission,omitempty"`
+	Reminder   int    `json:"reminder,omitempty"`
+	Delivered  bool   `json:"delivered"`
+	Error      string `json:"error,omitempty"`
+}
+
+type permResult struct {
+	approve bool
+	err     error
+}
+
+type permWait struct {
+	mu        sync.Mutex
+	id        string
+	withdrawn bool
+	answer    chan permResult
+}
+
+func (w *permWait) alreadyWithdrawn() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.withdrawn
+}
+
+func (w *permWait) claim(id string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.id = id
+	return w.withdrawn
+}
+
+func (w *permWait) withdraw() (string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.withdrawn {
+		return "", false
+	}
+	w.withdrawn = true
+	return w.id, w.id != ""
+}
+
+type permReminder struct {
+	timer *time.Timer
+	n     int
+	perm  lifecycle.Permission
 }
 
 // actor owns one run. Its goroutine runs every function sent to inbox and is
@@ -72,19 +123,23 @@ type actor struct {
 	gen *generation
 	// closing is the last closed generation. Its agent may still be
 	// shutting down.
-	closing *generation
-	perms   int
+	closing     *generation
+	perms       int
+	permRetries map[string]int
+	carried     []store.NewEvent
 }
 
 // generation is one agent session of a run. Everything a session reports
 // carries its generation, so reports from a closed session are dropped.
 type generation struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	session Session
-	closed  chan struct{}
-	turn    turnSummary
-	answers map[string]chan<- bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	session   Session
+	closed    chan struct{}
+	turn      turnSummary
+	retries   int
+	answers   map[string]chan<- permResult
+	reminders map[string]*permReminder
 }
 
 func (a *actor) loop() {
@@ -177,43 +232,116 @@ func (a *actor) apply(e lifecycle.Event, edit func(*store.Run)) (store.Run, erro
 	return a.applyTo(run, e, edit)
 }
 
-// applyTo applies e to run, the run as this job last left it, stores the
-// result, and performs its effects.
 func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run)) (store.Run, error) {
+	a.hydrateRetries(&run.Lifecycle)
+	prev := run.Lifecycle
 	next, effects, err := lifecycle.Apply(run.Lifecycle, e)
 	if err != nil {
 		return run, err
 	}
-	changed := next.State != run.Lifecycle.State
+	a.rememberRetries(next)
+	changed := next.State != prev.State
 	run.Lifecycle = next
 	if edit != nil {
 		edit(&run)
 	}
-	// A stopping run moves on when its RemoveWorktree reports back later in
-	// this job, so the store never holds the state.
-	if next.State == lifecycle.Stopping {
-		return run, a.perform(run, effects)
-	}
-	run.UpdatedAt = time.Now().UTC()
-	var status []store.NewEvent
-	if changed {
-		data, err := json.Marshal(statusData{Status: next.State, Error: next.Error})
-		if err != nil {
-			return run, err
-		}
-		status = []store.NewEvent{{Time: run.UpdatedAt, Type: eventStatus, Data: data}}
-	}
-	appended, err := a.d.store.UpdateRun(a.d.writes, run, status...)
+	at := time.Now().UTC()
+	events, err := transitionEvents(effects, next, changed, at)
 	if err != nil {
 		return run, err
 	}
-	for _, e := range appended {
-		a.appendNDJSON(e)
+	if next.State == lifecycle.Stopping {
+		a.carried = append(a.carried, events...)
+		return run, a.perform(run, effects)
+	}
+	run.UpdatedAt = at
+	events = append(a.carried, events...)
+	a.carried = nil
+	appended, err := a.d.store.UpdateRun(a.d.writes, run, events...)
+	if err != nil {
+		return run, err
+	}
+	for _, ev := range appended {
+		a.appendNDJSON(ev)
 	}
 	if changed {
 		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
 	}
 	return run, a.perform(run, effects)
+}
+
+func (a *actor) hydrateRetries(r *lifecycle.Run) {
+	if len(a.permRetries) == 0 {
+		return
+	}
+	for i := range r.Permissions {
+		r.Permissions[i].Retries = a.permRetries[r.Permissions[i].ID]
+	}
+}
+
+func (a *actor) rememberRetries(r lifecycle.Run) {
+	if len(r.Permissions) == 0 {
+		a.permRetries = nil
+		return
+	}
+	m := make(map[string]int, len(r.Permissions))
+	for _, p := range r.Permissions {
+		m[p.ID] = p.Retries
+	}
+	a.permRetries = m
+}
+
+func transitionEvents(effects []lifecycle.Effect, next lifecycle.Run, changed bool, at time.Time) ([]store.NewEvent, error) {
+	var cancels, answered []store.NewEvent
+	var requested *store.NewEvent
+	for _, eff := range effects {
+		switch eff := eff.(type) {
+		case lifecycle.CancelPermission:
+			ev, err := newEvent(at, eventPermissionCancelled, permissionCancelledData{
+				ID:           eff.ID,
+				Reason:       string(eff.Reason),
+				SupersededBy: eff.SupersededBy,
+			})
+			if err != nil {
+				return nil, err
+			}
+			cancels = append(cancels, ev)
+		case lifecycle.AnswerPermission:
+			ev, err := newEvent(at, eventPermissionAnswered, permissionAnsweredData{ID: eff.ID, Approved: eff.Approve})
+			if err != nil {
+				return nil, err
+			}
+			answered = append(answered, ev)
+		case lifecycle.NotifyPermission:
+			ev, err := newEvent(at, eventPermissionRequested, eff.Permission)
+			if err != nil {
+				return nil, err
+			}
+			requested = &ev
+		}
+	}
+	var out []store.NewEvent
+	out = append(out, cancels...)
+	if changed && next.State != lifecycle.Stopping {
+		ev, err := newEvent(at, eventStatus, statusData{Status: next.State, Error: next.Error})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ev)
+	}
+	if requested != nil {
+		out = append(out, *requested)
+	}
+	out = append(out, answered...)
+	return out, nil
+}
+
+func newEvent(at time.Time, typ string, data any) (store.NewEvent, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return store.NewEvent{}, err
+	}
+	return store.NewEvent{Time: at, Type: typ, Data: raw}, nil
 }
 
 func (a *actor) record(e lifecycle.Event, edit func(*store.Run)) {
@@ -236,6 +364,10 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 			a.sendPrompt(eff.Prompt)
 		case lifecycle.AnswerPermission:
 			a.answerPermission(eff)
+		case lifecycle.CancelPermission:
+			a.cancelPermission(eff)
+		case lifecycle.NotifyPermission:
+			a.notifyPermission(eff.Permission)
 		case lifecycle.CloseBackend:
 			a.closeBackend()
 		case lifecycle.RemoveWorktree:
@@ -290,7 +422,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		return
 	}
 	ctx, cancel := context.WithCancel(a.d.ctx)
-	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- bool{}}
+	g := &generation{ctx: ctx, cancel: cancel, closed: make(chan struct{}), answers: map[string]chan<- permResult{}}
 	g.session = newSession(sink{a: a, g: g})
 	a.gen = g
 	a.sweepMu.Lock()
@@ -352,6 +484,9 @@ func (a *actor) promptDone(g *generation, err error) {
 }
 
 func (a *actor) agentEvent(g *generation, e backend.Event) {
+	if e.Type == backend.EventTransportError {
+		g.retries++
+	}
 	if a.d.cfg.StoreAllEvents || !unstoredEvents[e.Type] {
 		a.appendEvent(e.Type, e.Data)
 	}
@@ -364,7 +499,7 @@ type turnSummary struct {
 }
 
 func (s *turnSummary) add(e backend.Event) {
-	if e.Type == "tool_call" || e.Type == "tool_call_update" {
+	if e.Type == "tool_call" || e.Type == "tool_call_update" || e.Type == backend.EventTransportError {
 		s.endMessage()
 		return
 	}
@@ -394,15 +529,31 @@ func (s *turnSummary) Reset() {
 	s.currentMessage.Reset()
 }
 
-func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, answer chan<- bool) {
-	p := lifecycle.Permission{ID: a.nextPermissionID(), Title: req.Title, ToolCall: req.ToolCall, Options: req.Options}
-	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
-	if err != nil || run.Lifecycle.State != lifecycle.AwaitingPermission {
-		answer <- false
+func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, w *permWait) {
+	if w.alreadyWithdrawn() {
 		return
 	}
-	g.answers[p.ID] = answer
-	a.appendEvent(eventPermissionRequested, p)
+	p := lifecycle.Permission{
+		ID:         a.nextPermissionID(),
+		Title:      req.Title,
+		ToolCallID: req.ToolCallID,
+		Kind:       req.Kind,
+		Command:    req.Command,
+		URL:        req.URL,
+		ToolCall:   req.ToolCall,
+		Options:    req.Options,
+		Retries:    g.retries,
+	}
+	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
+	if err != nil || !hasPermission(run.Lifecycle, p.ID) {
+		sendResult(w.answer, permResult{approve: false})
+		return
+	}
+	if w.claim(p.ID) {
+		a.record(lifecycle.PermissionCancelled{ID: p.ID, Reason: lifecycle.CancelWithdrawn}, nil)
+		return
+	}
+	g.answers[p.ID] = w.answer
 }
 
 // nextPermissionID counts from the stored events, so IDs stay unique across
@@ -424,21 +575,52 @@ func (a *actor) nextPermissionID() string {
 }
 
 func (a *actor) answerPermission(eff lifecycle.AnswerPermission) {
-	if a.gen != nil {
-		if answer, ok := a.gen.answers[eff.ID]; ok {
-			answer <- eff.Approve
-			delete(a.gen.answers, eff.ID)
-		}
+	a.stopReminder(eff.ID)
+	if a.gen == nil {
+		return
 	}
-	a.appendEvent(eventPermissionAnswered, permissionAnsweredData{ID: eff.ID, Approved: eff.Approve})
+	if ch, ok := a.gen.answers[eff.ID]; ok {
+		sendResult(ch, permResult{approve: eff.Approve})
+		delete(a.gen.answers, eff.ID)
+	}
+}
+
+func (a *actor) cancelPermission(eff lifecycle.CancelPermission) {
+	a.stopReminder(eff.ID)
+	if a.gen == nil {
+		return
+	}
+	ch := a.gen.answers[eff.ID]
+	delete(a.gen.answers, eff.ID)
+	sendResult(ch, permResult{err: errPermissionCancelled})
 }
 
 func (a *actor) closeBackend() {
 	if a.gen != nil {
+		a.stopReminders(a.gen)
 		a.gen.cancel()
 		a.closing = a.gen
 		a.gen = nil
 	}
+}
+
+func (a *actor) stopReminders(g *generation) {
+	for id, rem := range g.reminders {
+		rem.timer.Stop()
+		delete(g.reminders, id)
+	}
+}
+
+func (a *actor) stopReminder(id string) {
+	if a.gen == nil {
+		return
+	}
+	rem := a.gen.reminders[id]
+	if rem == nil {
+		return
+	}
+	rem.timer.Stop()
+	delete(a.gen.reminders, id)
 }
 
 // closeWait exceeds the longest Close plus one sweep of the worktree.
@@ -501,6 +683,122 @@ func (a *actor) delivered(status string, err error) {
 	a.appendEvent(eventWebhook, data)
 }
 
+func (a *actor) notifyPermission(p lifecycle.Permission) {
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		a.d.log.Error("permission webhook", "run", a.id, "err", err)
+	} else {
+		a.sendPermissionWebhook(webhook.EventPermissionRequested, run, p, 0)
+	}
+	a.armReminder(p)
+}
+
+func (a *actor) reminderInterval() time.Duration {
+	if a.d.webhook == nil {
+		return 0
+	}
+	sender, err := a.d.webhook()
+	if err != nil || sender == nil {
+		return 0
+	}
+	return sender.Reminder
+}
+
+func (a *actor) armReminder(p lifecycle.Permission) {
+	g := a.gen
+	if g == nil {
+		return
+	}
+	interval := a.reminderInterval()
+	if interval <= 0 {
+		return
+	}
+	a.scheduleReminder(g, p, interval, 0)
+}
+
+func (a *actor) scheduleReminder(g *generation, p lifecycle.Permission, interval time.Duration, n int) {
+	if g.reminders == nil {
+		g.reminders = map[string]*permReminder{}
+	}
+	if old := g.reminders[p.ID]; old != nil {
+		old.timer.Stop()
+	}
+	timer := time.AfterFunc(interval, func() {
+		a.postFrom(g, func() { a.fireReminder(g, p.ID) })
+	})
+	g.reminders[p.ID] = &permReminder{timer: timer, n: n, perm: p}
+}
+
+func (a *actor) fireReminder(g *generation, id string) {
+	if g != a.gen {
+		return
+	}
+	rem := g.reminders[id]
+	if rem == nil {
+		return
+	}
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil || !hasPermission(run.Lifecycle, id) {
+		a.stopReminder(id)
+		return
+	}
+	interval := a.reminderInterval()
+	if interval <= 0 {
+		a.stopReminder(id)
+		return
+	}
+	n := rem.n + 1
+	perm := rem.perm
+	a.sendPermissionWebhook(webhook.EventPermissionReminder, run, perm, n)
+	a.scheduleReminder(g, perm, interval, n)
+}
+
+func (a *actor) sendPermissionWebhook(event string, run store.Run, p lifecycle.Permission, reminder int) {
+	if a.d.webhook == nil {
+		return
+	}
+	payload := webhook.Payload{
+		Event:     event,
+		Timestamp: time.Now().UTC(),
+		RunID:     string(run.ID),
+		Status:    string(run.Lifecycle.State),
+		Repo:      run.Repo,
+		Branch:    run.Branch,
+		Permission: &webhook.Permission{
+			ID:      p.ID,
+			Title:   p.Title,
+			Kind:    p.Kind,
+			Command: p.Command,
+			URL:     p.URL,
+			Options: p.Options,
+		},
+		Reminder: reminder,
+	}
+	a.d.wg.Go(func() {
+		sender, err := a.d.webhook()
+		if err == nil && sender == nil {
+			return
+		}
+		if err == nil {
+			_, err = sender.Send(a.d.ctx, payload)
+		}
+		a.post(func() {
+			data := webhookData{
+				Event:      event,
+				Status:     payload.Status,
+				Permission: p.ID,
+				Reminder:   reminder,
+				Delivered:  err == nil,
+			}
+			if err != nil {
+				data.Error = err.Error()
+				a.d.log.Warn("deliver webhook", "run", a.id, "status", payload.Status, "err", err)
+			}
+			a.appendEvent(eventWebhook, data)
+		})
+	})
+}
+
 func (a *actor) appendEvent(typ string, data any) {
 	raw, err := json.Marshal(data)
 	if err != nil {
@@ -530,19 +828,46 @@ func (s sink) Event(e backend.Event) {
 	s.a.postFrom(s.g, func() { s.a.agentEvent(s.g, e) })
 }
 
-var errSessionClosed = errors.New("the agent session was closed")
+var (
+	errSessionClosed       = errors.New("the agent session was closed")
+	errPermissionCancelled = errors.New("permission cancelled")
+)
 
 func (s sink) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
-	answer := make(chan bool, 1)
-	if !s.a.postFrom(s.g, func() { s.a.permissionAsked(s.g, req, answer) }) {
+	w := &permWait{answer: make(chan permResult, 1)}
+	if !s.a.postFrom(s.g, func() { s.a.permissionAsked(s.g, req, w) }) {
 		return false, errSessionClosed
 	}
 	select {
-	case approve := <-answer:
-		return approve, nil
+	case res := <-w.answer:
+		return res.approve, res.err
 	case <-ctx.Done():
+		if id, ok := w.withdraw(); ok {
+			s.a.postFrom(s.g, func() {
+				s.a.record(lifecycle.PermissionCancelled{ID: id, Reason: lifecycle.CancelWithdrawn}, nil)
+			})
+		}
 		return false, ctx.Err()
 	case <-s.g.ctx.Done():
 		return false, errSessionClosed
+	}
+}
+
+func hasPermission(r lifecycle.Run, id string) bool {
+	for _, p := range r.Permissions {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func sendResult(ch chan<- permResult, res permResult) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- res:
+	default:
 	}
 }

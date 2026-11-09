@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 )
@@ -136,6 +137,55 @@ func TestLoadRejectsWebhookHeaders(t *testing.T) {
 	}
 }
 
+func TestReminderDuration(t *testing.T) {
+	d, err := (Webhook{}).ReminderDuration()
+	if err != nil || d != 0 {
+		t.Fatalf("empty = %s, %v", d, err)
+	}
+	d, err = (Webhook{Reminder: "5m"}).ReminderDuration()
+	if err != nil || d != 5*time.Minute {
+		t.Fatalf("5m = %s, %v", d, err)
+	}
+	if _, err := (Webhook{Reminder: "soon"}).ReminderDuration(); err == nil || !strings.Contains(err.Error(), "webhook.reminder") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadReminder(t *testing.T) {
+	home := testHome(t)
+	writeConfig(t, home, `{
+		"webhook": {"url": "https://example.com/hook", "secret": "s3cret", "reminder": "5m"}
+	}`)
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Webhook.Reminder != "5m" {
+		t.Fatalf("reminder = %q", got.Webhook.Reminder)
+	}
+	d, err := got.Webhook.ReminderDuration()
+	if err != nil || d != 5*time.Minute {
+		t.Fatalf("duration = %s, %v", d, err)
+	}
+}
+
+func TestSaveWebhookKeepsReminder(t *testing.T) {
+	home := testHome(t)
+	writeConfig(t, home, `{
+  "webhook": {"url": "https://example.com/old", "secret": "keep-this-secret", "reminder": "5m"}
+}`)
+	if _, err := SaveWebhook(home, "https://example.com/hook", "Bearer key"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Webhook.Reminder != "5m" || got.Webhook.URL != "https://example.com/hook" || got.Webhook.Secret != "keep-this-secret" {
+		t.Fatalf("webhook = %+v", got.Webhook)
+	}
+}
+
 func TestLoadTrustWorktree(t *testing.T) {
 	home := testHome(t)
 	writeConfig(t, home, `{"trustWorktree": false}`)
@@ -169,6 +219,9 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{name: "url without secret", body: `{"webhook":{"url":"https://example.com/hook"}}`, want: "webhook.secret"},
 		{name: "ftp url", body: `{"webhook":{"url":"ftp://example.com/hook","secret":"x"}}`, want: "webhook.url"},
 		{name: "url without host", body: `{"webhook":{"url":"https://","secret":"x"}}`, want: "webhook.url"},
+		{name: "bad reminder", body: `{"webhook":{"reminder":"soon"}}`, want: "webhook.reminder"},
+		{name: "zero reminder", body: `{"webhook":{"reminder":"0s"}}`, want: "webhook.reminder"},
+		{name: "negative reminder", body: `{"webhook":{"reminder":"-1s"}}`, want: "webhook.reminder"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

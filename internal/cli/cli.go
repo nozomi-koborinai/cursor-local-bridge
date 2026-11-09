@@ -155,6 +155,10 @@ func newSender(w config.Webhook) *webhook.Sender {
 	for k, v := range w.Headers {
 		hdr.Set(k, v)
 	}
+	var reminder time.Duration
+	if d, err := w.ReminderDuration(); err == nil {
+		reminder = d
+	}
 	return &webhook.Sender{
 		URL:      w.URL,
 		Secret:   []byte(w.Secret),
@@ -162,6 +166,7 @@ func newSender(w config.Webhook) *webhook.Sender {
 		Client:   &http.Client{Timeout: 10 * time.Second},
 		Backoff:  time.Second,
 		Attempts: 3,
+		Reminder: reminder,
 	}
 }
 

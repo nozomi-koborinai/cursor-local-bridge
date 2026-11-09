@@ -327,7 +327,12 @@ func (c client) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 	}
 	ev := backend.Event{Type: head.SessionUpdate, Data: data}
 	if chunk := n.Update.AgentMessageChunk; chunk != nil && chunk.Content.Text != nil {
-		ev.Text = chunk.Content.Text.Text
+		text := chunk.Content.Text.Text
+		if backend.IsTransportError(text) {
+			ev.Type = backend.EventTransportError
+		} else {
+			ev.Text = text
+		}
 	}
 	c.s.sink.Event(ev)
 	return nil
@@ -337,24 +342,13 @@ func (c client) RequestPermission(ctx context.Context, req acpsdk.RequestPermiss
 	cancelled := acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
 		Cancelled: &acpsdk.RequestPermissionOutcomeCancelled{},
 	}}
-	toolCall, err := json.Marshal(req.ToolCall)
+	asked, err := permissionRequest(req)
 	if err != nil {
 		return cancelled, nil
 	}
-	var title string
-	if req.ToolCall.Title != nil {
-		title = *req.ToolCall.Title
-	}
-	var options json.RawMessage
-	if len(req.Options) > 0 {
-		options, err = json.Marshal(req.Options)
-		if err != nil {
-			return cancelled, nil
-		}
-	}
 	ctx, cancel := c.s.bind(ctx)
 	defer cancel()
-	approve, err := c.s.sink.Permission(ctx, backend.PermissionRequest{Title: title, ToolCall: toolCall, Options: options})
+	approve, err := c.s.sink.Permission(ctx, asked)
 	if err != nil {
 		return cancelled, nil
 	}
@@ -366,6 +360,74 @@ func (c client) RequestPermission(ctx context.Context, req acpsdk.RequestPermiss
 		}
 	}
 	return cancelled, nil
+}
+
+func permissionRequest(req acpsdk.RequestPermissionRequest) (backend.PermissionRequest, error) {
+	toolCall, err := json.Marshal(req.ToolCall)
+	if err != nil {
+		return backend.PermissionRequest{}, err
+	}
+	var title string
+	if req.ToolCall.Title != nil {
+		title = *req.ToolCall.Title
+	}
+	var kind string
+	if req.ToolCall.Kind != nil {
+		kind = string(*req.ToolCall.Kind)
+	}
+	var options json.RawMessage
+	if len(req.Options) > 0 {
+		options, err = json.Marshal(req.Options)
+		if err != nil {
+			return backend.PermissionRequest{}, err
+		}
+	}
+	command, url := commandAndURL(req.ToolCall.RawInput)
+	return backend.PermissionRequest{
+		Title:      title,
+		ToolCallID: string(req.ToolCall.ToolCallId),
+		Kind:       kind,
+		Command:    command,
+		URL:        url,
+		ToolCall:   toolCall,
+		Options:    options,
+	}, nil
+}
+
+func commandAndURL(raw any) (command, url string) {
+	fields := rawObject(raw)
+	if fields == nil {
+		return "", ""
+	}
+	command, _ = fields["command"].(string)
+	url, _ = fields["url"].(string)
+	return command, url
+}
+
+func rawObject(raw any) map[string]any {
+	switch v := raw.(type) {
+	case map[string]any:
+		return v
+	case json.RawMessage:
+		return decodeObject([]byte(v))
+	case []byte:
+		return decodeObject(v)
+	case string:
+		return decodeObject([]byte(v))
+	default:
+		return nil
+	}
+}
+
+func decodeObject(b []byte) map[string]any {
+	if len(b) == 0 {
+		return nil
+	}
+	var fields map[string]any
+	if json.Unmarshal(b, &fields) != nil {
+		return nil
+	}
+	return fields
 }
 
 func (client) ReadTextFile(context.Context, acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {

@@ -39,12 +39,27 @@ func (s State) Active() bool {
 	return s == Queued || s == Running || s == AwaitingPermission
 }
 
+// CancelReason says why a pending permission was dropped.
+type CancelReason string
+
+const (
+	CancelWithdrawn  CancelReason = "cancelled"
+	CancelSuperseded CancelReason = "superseded"
+	CancelTurnEnded  CancelReason = "turn_ended"
+	CancelRunEnded   CancelReason = "run_ended"
+)
+
 // Permission is a tool call the agent wants to run and is waiting on.
 type Permission struct {
-	ID       string          `json:"id"`
-	Title    string          `json:"title"`
-	ToolCall json.RawMessage `json:"toolCall,omitempty"`
-	Options  json.RawMessage `json:"options,omitempty"`
+	ID         string          `json:"id"`
+	Title      string          `json:"title"`
+	ToolCallID string          `json:"toolCallId,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Command    string          `json:"command,omitempty"`
+	URL        string          `json:"url,omitempty"`
+	ToolCall   json.RawMessage `json:"toolCall,omitempty"`
+	Options    json.RawMessage `json:"options,omitempty"`
+	Retries    int             `json:"-"`
 }
 
 // Run is the lifecycle part of a run record.
@@ -73,6 +88,13 @@ type PermissionRequested struct{ Permission Permission }
 // PermissionAnswered approves or denies the oldest pending permission.
 type PermissionAnswered struct{ Approve bool }
 
+// PermissionCancelled reports that the agent withdrew or cancelled the
+// permission request with ID (for example via $/cancel_request or stream cancel).
+type PermissionCancelled struct {
+	ID     string
+	Reason CancelReason
+}
+
 // FollowUp queues a prompt, or resumes a finished run with it.
 type FollowUp struct{ Prompt string }
 
@@ -94,6 +116,7 @@ func (Started) event()              {}
 func (TurnEnded) event()            {}
 func (PermissionRequested) event()  {}
 func (PermissionAnswered) event()   {}
+func (PermissionCancelled) event()  {}
 func (FollowUp) event()             {}
 func (Stop) event()                 {}
 func (BackendFailed) event()        {}
@@ -113,6 +136,20 @@ type AnswerPermission struct {
 	Approve bool
 }
 
+// CancelPermission unblocks a pending permission request as cancelled and
+// records a permission_cancelled event in the run log.
+type CancelPermission struct {
+	ID           string
+	Reason       CancelReason
+	SupersededBy string
+}
+
+// NotifyPermission delivers the permissionRequested webhook and arms the
+// reminder timer for Permission.
+type NotifyPermission struct {
+	Permission Permission
+}
+
 // CloseBackend cancels any turn in flight and terminates the agent process.
 type CloseBackend struct{}
 
@@ -126,6 +163,8 @@ type Notify struct{ State State }
 func (StartBackend) effect()     {}
 func (SendPrompt) effect()       {}
 func (AnswerPermission) effect() {}
+func (CancelPermission) effect() {}
+func (NotifyPermission) effect() {}
 func (CloseBackend) effect()     {}
 func (RemoveWorktree) effect()   {}
 func (Notify) effect()           {}
@@ -156,17 +195,43 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		if r.State != Running && r.State != AwaitingPermission {
 			return r, nil, nil
 		}
+		cancels := cancelAll(r.Permissions, CancelTurnEnded)
 		r.Permissions = nil
 		next, effects := sendNextOrFinish(r)
-		return next, effects, nil
+		return next, append(cancels, effects...), nil
 
 	case PermissionRequested:
 		if r.State != Running && r.State != AwaitingPermission {
 			return r, nil, nil
 		}
+		p := e.Permission
+		var effects []Effect
+		kept := make([]Permission, 0, len(r.Permissions))
+		for _, old := range r.Permissions {
+			if superseded(p, old) {
+				effects = append(effects, CancelPermission{ID: old.ID, Reason: CancelSuperseded, SupersededBy: p.ID})
+				continue
+			}
+			kept = append(kept, old)
+		}
+		r.Permissions = append(kept, p)
 		r.State = AwaitingPermission
-		r.Permissions = append(clone(r.Permissions), e.Permission)
-		return r, nil, nil
+		effects = append(effects, NotifyPermission{Permission: p})
+		return r, effects, nil
+
+	case PermissionCancelled:
+		if r.State != Running && r.State != AwaitingPermission {
+			return r, nil, nil
+		}
+		next, ok := withoutPermission(r.Permissions, e.ID)
+		if !ok {
+			return r, nil, nil
+		}
+		r.Permissions = next
+		if len(r.Permissions) == 0 && r.State == AwaitingPermission {
+			r.State = Running
+		}
+		return r, []Effect{CancelPermission{ID: e.ID, Reason: e.Reason}}, nil
 
 	case PermissionAnswered:
 		if r.State != AwaitingPermission {
@@ -193,7 +258,8 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 	case Stop:
 		switch r.State {
 		case Queued, Running, AwaitingPermission:
-			return Run{State: Stopping}, []Effect{CloseBackend{}, RemoveWorktree{}}, nil
+			cancels := cancelAll(r.Permissions, CancelRunEnded)
+			return Run{State: Stopping}, append(cancels, CloseBackend{}, RemoveWorktree{}), nil
 		case Finished:
 			return Run{State: Stopping}, []Effect{RemoveWorktree{}}, nil
 		default:
@@ -204,7 +270,8 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		if !r.State.Active() {
 			return r, nil, nil
 		}
-		return Run{State: Failed, Error: e.Err}, []Effect{CloseBackend{}, Notify{State: Failed}}, nil
+		cancels := cancelAll(r.Permissions, CancelRunEnded)
+		return Run{State: Failed, Error: e.Err}, append(cancels, CloseBackend{}, Notify{State: Failed}), nil
 
 	case WorktreeRemoved:
 		if r.State != Stopping {
@@ -229,6 +296,43 @@ func sendNextOrFinish(r Run) (Run, []Effect) {
 	r.State = Running
 	r.Prompts = clone(r.Prompts[1:])
 	return r, []Effect{SendPrompt{Prompt: prompt}}
+}
+
+func superseded(next, old Permission) bool {
+	if next.ToolCallID != "" && next.ToolCallID == old.ToolCallID {
+		return true
+	}
+	return next.Retries > old.Retries
+}
+
+func cancelAll(perms []Permission, reason CancelReason) []Effect {
+	if len(perms) == 0 {
+		return nil
+	}
+	out := make([]Effect, 0, len(perms))
+	for _, p := range perms {
+		out = append(out, CancelPermission{ID: p.ID, Reason: reason})
+	}
+	return out
+}
+
+func withoutPermission(perms []Permission, id string) ([]Permission, bool) {
+	next := make([]Permission, 0, len(perms))
+	found := false
+	for _, p := range perms {
+		if p.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, p)
+	}
+	if !found {
+		return perms, false
+	}
+	if len(next) == 0 {
+		return nil, true
+	}
+	return next, true
 }
 
 func notAllowed(action string, s State) error {

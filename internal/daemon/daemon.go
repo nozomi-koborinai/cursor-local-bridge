@@ -325,7 +325,16 @@ func toIPCRun(r store.Run) ipc.Run {
 	}
 	if len(r.Lifecycle.Permissions) > 0 {
 		p := r.Lifecycle.Permissions[0]
-		out.PendingPermission = &ipc.Permission{ID: p.ID, Title: p.Title, ToolCall: p.ToolCall, Options: p.Options}
+		out.PendingPermission = &ipc.Permission{
+			ID:         p.ID,
+			Title:      p.Title,
+			ToolCallID: p.ToolCallID,
+			Kind:       p.Kind,
+			Command:    p.Command,
+			URL:        p.URL,
+			ToolCall:   p.ToolCall,
+			Options:    p.Options,
+		}
 	}
 	return out
 }

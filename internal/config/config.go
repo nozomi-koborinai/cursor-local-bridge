@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
@@ -50,12 +51,28 @@ type Config struct {
 	TrustWorktree bool `json:"trustWorktree"`
 }
 
-// Webhook configures completion notifications.
+// Webhook configures run notifications.
 type Webhook struct {
 	URL    string `json:"url"`
 	Secret string `json:"secret"`
 	// Headers are extra request headers sent on every delivery.
 	Headers map[string]string `json:"headers"`
+	// Reminder is how long a pending permission waits before each
+	// permissionReminder webhook. Empty sends none. A Go duration such as "5m".
+	Reminder string `json:"reminder,omitempty"`
+}
+
+// ReminderDuration returns the parsed positive reminder interval, or 0 when
+// Reminder is empty.
+func (w Webhook) ReminderDuration() (time.Duration, error) {
+	if w.Reminder == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(w.Reminder)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("webhook.reminder %q must be a positive duration", w.Reminder)
+	}
+	return d, nil
 }
 
 // DefaultHome returns $CLB_HOME, or ~/.clb when it is unset.
@@ -325,6 +342,9 @@ func validate(path string, cfg Config) error {
 func validateWebhook(path string, hook Webhook) error {
 	if err := webhook.CheckHeaders(hook.Headers); err != nil {
 		return fmt.Errorf("%s: webhook.headers: %w", path, err)
+	}
+	if _, err := hook.ReminderDuration(); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	if hook.URL == "" {
 		return nil

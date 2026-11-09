@@ -48,6 +48,27 @@ func TestPrintLaunchWithTrust(t *testing.T) {
 	}
 }
 
+func TestPrintTransportErrorStaysOutOfSummary(t *testing.T) {
+	c, repo := startPrintCLB(t, true)
+	launched := c.run(t, "launch", "--backend", "print", "--repo", repo, "[transport] hi")
+	done := c.waitStatus(t, launched.ID, "finished")
+	if done.Summary != "after" || strings.Contains(done.Summary, "RetriableError") {
+		t.Fatalf("summary = %q", done.Summary)
+	}
+	var saw bool
+	for _, e := range c.logs(t, launched.ID) {
+		if e.Type == "transport_error" && strings.Contains(string(e.Data), "RetriableError: http/2 stream closed") {
+			saw = true
+		}
+		if e.Type == "assistant" && strings.Contains(string(e.Data), "RetriableError") {
+			t.Fatalf("assistant event contains the transport error: %s", e.Data)
+		}
+	}
+	if !saw {
+		t.Fatal("logs have no transport_error event")
+	}
+}
+
 func startPrintCLB(t *testing.T, trust bool) (*clb, string) {
 	t.Helper()
 	bin := t.TempDir()

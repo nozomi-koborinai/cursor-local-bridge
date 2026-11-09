@@ -231,7 +231,12 @@ func parseLine(line []byte) (backend.Event, *result, bool) {
 	var res *result
 	switch head.Type {
 	case "assistant":
-		ev.Text = assistantText(head.Message)
+		text := assistantText(head.Message)
+		if backend.IsTransportError(text) {
+			ev.Type = backend.EventTransportError
+		} else {
+			ev.Text = text
+		}
 	case "result":
 		res = &result{}
 		if json.Unmarshal(line, res) != nil {

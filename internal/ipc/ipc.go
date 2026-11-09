@@ -79,10 +79,14 @@ type Run struct {
 
 // Permission is the oldest unanswered permission request of a run.
 type Permission struct {
-	ID       string          `json:"id"`
-	Title    string          `json:"title"`
-	ToolCall json.RawMessage `json:"toolCall,omitempty"`
-	Options  json.RawMessage `json:"options,omitempty"`
+	ID         string          `json:"id"`
+	Title      string          `json:"title"`
+	ToolCallID string          `json:"toolCallId,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Command    string          `json:"command,omitempty"`
+	URL        string          `json:"url,omitempty"`
+	ToolCall   json.RawMessage `json:"toolCall,omitempty"`
+	Options    json.RawMessage `json:"options,omitempty"`
 }
 
 // Event is one entry of a run's event log. The daemon writes the same JSON,

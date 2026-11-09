@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Kind names a way of driving the Cursor CLI.
@@ -35,6 +36,30 @@ type StartOptions struct {
 	ResumeSessionID string
 }
 
+// EventTransportError is the Event.Type for a transport error (such as
+// RetriableError on a closed HTTP/2 stream) that arrived inside an
+// agent_message_chunk. Its Text is always empty so it never enters the run
+// summary.
+const EventTransportError = "transport_error"
+
+// IsTransportError reports whether an agent message chunk text is a transport
+// error diagnostic rather than assistant reply text.
+func IsTransportError(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "RetriableError") {
+		return true
+	}
+	if !strings.Contains(text, "RetriableError") {
+		return false
+	}
+	for _, marker := range []string{"stream closed", "http/2", "http2", "CANCEL"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Event is one item of agent output, stored in the run's event log as is.
 type Event struct {
 	// Type is the protocol's own discriminator, such as the ACP
@@ -48,8 +73,12 @@ type Event struct {
 
 // PermissionRequest describes a tool call the agent wants approved.
 type PermissionRequest struct {
-	Title    string
-	ToolCall json.RawMessage
+	Title      string
+	ToolCallID string
+	Kind       string
+	Command    string
+	URL        string
+	ToolCall   json.RawMessage
 	// Options is the agent's permission choices as a JSON array of optionId,
 	// name, and kind.
 	Options json.RawMessage

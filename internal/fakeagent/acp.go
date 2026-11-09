@@ -147,6 +147,8 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		reply, err = a.askPermission(ctx, req.SessionId)
 	case scriptBackground:
 		reply, err = a.background(ctx, req.SessionId, c.Cwd)
+	case scriptTransport:
+		reply, err = a.transport(ctx, req.SessionId)
 	default:
 		reply, err = a.echo(ctx, req.SessionId, prompt.String())
 	}
@@ -249,6 +251,20 @@ func (a *fakeACP) askPermission(ctx context.Context, sid acp.SessionId) (string,
 		}
 	}
 	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
+}
+
+func (a *fakeACP) transport(ctx context.Context, sid acp.SessionId) (string, error) {
+	const bad = "RetriableError: http/2 stream closed"
+	if err := a.update(ctx, sid, acp.UpdateAgentMessageText("before")); err != nil {
+		return "", err
+	}
+	if err := a.update(ctx, sid, acp.UpdateAgentMessageText(bad)); err != nil {
+		return "", err
+	}
+	if err := a.update(ctx, sid, acp.UpdateAgentMessageText("after")); err != nil {
+		return "", err
+	}
+	return "before\nafter", nil
 }
 
 func (a *fakeACP) slow(ctx context.Context, sid acp.SessionId) (string, error) {
