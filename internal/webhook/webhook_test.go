@@ -116,6 +116,90 @@ func TestSendPostsSignedPayload(t *testing.T) {
 		!decoded.Timestamp.Equal(payload.Timestamp) {
 		t.Fatalf("payload = %+v", decoded)
 	}
+	if decoded.Permission != nil || decoded.Reminder != 0 {
+		t.Fatalf("status payload included permission fields: %+v", decoded)
+	}
+}
+
+func TestSendPermissionPayload(t *testing.T) {
+	secret := []byte("topsecret")
+	options := json.RawMessage(`[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]`)
+	payload := Payload{
+		Event:     EventPermissionRequested,
+		Timestamp: time.Date(2026, 11, 9, 9, 30, 4, 500000000, time.UTC),
+		RunID:     "run-0123abcd",
+		Status:    "awaiting_permission",
+		Repo:      "/path/to/repo",
+		Branch:    "clb/run-0123abcd",
+		Permission: &Permission{
+			ID:      "perm-1",
+			Title:   "`npm test`",
+			Kind:    "execute",
+			Command: "npm test",
+			Options: options,
+		},
+	}
+	var mu sync.Mutex
+	var got []byte
+	var hdr http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		mu.Lock()
+		got = body
+		hdr = r.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := Sender{URL: srv.URL, Secret: secret, Backoff: time.Millisecond, Reminder: 5 * time.Minute}
+	if _, err := s.Send(t.Context(), payload); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	body := append([]byte(nil), got...)
+	header := hdr.Clone()
+	mu.Unlock()
+	if header.Get(EventHeader) != EventPermissionRequested {
+		t.Fatalf("event header = %s", header.Get(EventHeader))
+	}
+	if !Verify(secret, body, header.Get(SignatureHeader)) {
+		t.Fatalf("signature = %s", header.Get(SignatureHeader))
+	}
+	var decoded Payload
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Event != EventPermissionRequested || decoded.RunID != payload.RunID || decoded.Status != payload.Status ||
+		decoded.Summary != "" || decoded.Error != "" || decoded.Reminder != 0 || decoded.Permission == nil {
+		t.Fatalf("payload = %+v", decoded)
+	}
+	p := decoded.Permission
+	if p.ID != "perm-1" || p.Title != "`npm test`" || p.Kind != "execute" || p.Command != "npm test" || p.URL != "" ||
+		string(p.Options) != string(options) {
+		t.Fatalf("permission = %+v", p)
+	}
+
+	payload.Event = EventPermissionReminder
+	payload.Reminder = 2
+	if _, err := s.Send(t.Context(), payload); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	body = append([]byte(nil), got...)
+	header = hdr.Clone()
+	mu.Unlock()
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Event != EventPermissionReminder || decoded.Reminder != 2 || header.Get(EventHeader) != EventPermissionReminder {
+		t.Fatalf("reminder payload = %+v header %s", decoded, header.Get(EventHeader))
+	}
 }
 
 func TestSendExtraHeaders(t *testing.T) {

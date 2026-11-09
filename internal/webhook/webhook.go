@@ -1,4 +1,4 @@
-// Package webhook delivers signed run status notifications over HTTP.
+// Package webhook delivers signed run notifications over HTTP.
 package webhook
 
 import (
@@ -35,8 +35,11 @@ const (
 	clbHeaderPrefix = "X-Clb-"
 )
 
-// EventStatusChange is the only event clb sends.
-const EventStatusChange = "statusChange"
+const (
+	EventStatusChange        = "statusChange"
+	EventPermissionRequested = "permissionRequested"
+	EventPermissionReminder  = "permissionReminder"
+)
 
 // reservedHeaders are canonical names CheckHeaders rejects.
 // Content-Type and User-Agent are written on every delivery.
@@ -107,16 +110,29 @@ func headerValueHasControl(v string) bool {
 	return false
 }
 
+// Permission is the tool call a permissionRequested or permissionReminder
+// payload describes.
+type Permission struct {
+	ID      string          `json:"id"`
+	Title   string          `json:"title,omitempty"`
+	Kind    string          `json:"kind,omitempty"`
+	Command string          `json:"command,omitempty"`
+	URL     string          `json:"url,omitempty"`
+	Options json.RawMessage `json:"options,omitempty"`
+}
+
 // Payload is the JSON body of a webhook request.
 type Payload struct {
-	Event     string    `json:"event"`
-	Timestamp time.Time `json:"timestamp"`
-	RunID     string    `json:"id"`
-	Status    string    `json:"status"`
-	Repo      string    `json:"repo"`
-	Branch    string    `json:"branch"`
-	Summary   string    `json:"summary,omitempty"`
-	Error     string    `json:"error,omitempty"`
+	Event      string      `json:"event"`
+	Timestamp  time.Time   `json:"timestamp"`
+	RunID      string      `json:"id"`
+	Status     string      `json:"status"`
+	Repo       string      `json:"repo"`
+	Branch     string      `json:"branch"`
+	Summary    string      `json:"summary,omitempty"`
+	Error      string      `json:"error,omitempty"`
+	Permission *Permission `json:"permission,omitempty"`
+	Reminder   int         `json:"reminder,omitempty"`
 }
 
 // Sign returns the SignatureHeader value for body.
@@ -143,6 +159,9 @@ type Sender struct {
 	Backoff time.Duration
 	// Attempts is the total number of tries, at least 1.
 	Attempts int
+	// Reminder is how long a pending permission waits before each
+	// permissionReminder. Zero sends no reminders.
+	Reminder time.Duration
 }
 
 // Send posts p and retries on network errors and 5xx responses until
