@@ -69,6 +69,10 @@ func (r *recorder) reportedModel() string {
 	return r.model
 }
 
+func (r *recorder) AgentProcess(backend.AgentProcess) {}
+
+func (r *recorder) Stderr(backend.Stderr) {}
+
 func (r *recorder) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
 	r.mu.Lock()
 	r.asked = append(r.asked, req)

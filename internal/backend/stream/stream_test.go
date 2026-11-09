@@ -68,6 +68,10 @@ func (r *recorder) reportedModel() string {
 	return r.model
 }
 
+func (r *recorder) AgentProcess(backend.AgentProcess) {}
+
+func (r *recorder) Stderr(backend.Stderr) {}
+
 func (r *recorder) Permission(context.Context, backend.PermissionRequest) (bool, error) {
 	r.t.Error("print mode asked for a permission")
 	return false, errors.New("unexpected permission request")

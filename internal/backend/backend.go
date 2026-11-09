@@ -28,6 +28,33 @@ func ParseKind(s string) (Kind, error) {
 	return "", fmt.Errorf("unknown backend %q (want %q or %q)", s, ACP, Print)
 }
 
+// Command names what an agent CLI process does for a session.
+type Command string
+
+const (
+	CommandACP        Command = "acp"         // agent acp
+	CommandCreateChat Command = "create-chat" // agent create-chat
+	CommandPrint      Command = "print"       // agent -p
+)
+
+// AgentProcess describes an agent CLI process that a session started.
+type AgentProcess struct {
+	PID     int
+	Command Command
+	// Version is what the CLI printed for --version just before the process
+	// started. It is empty exactly when VersionErr is set.
+	Version    string
+	VersionErr string
+}
+
+// Stderr is one line an agent process wrote to stderr. See proc.StderrLine
+// for pieces and Capped.
+type Stderr struct {
+	PID    int
+	Line   string
+	Capped bool
+}
+
 type StartOptions struct {
 	// Dir is the working directory of the agent, the run's worktree.
 	Dir string
@@ -103,6 +130,12 @@ type Sink interface {
 	Event(Event)
 	// Permission blocks until the request is answered or ctx ends.
 	Permission(ctx context.Context, req PermissionRequest) (approve bool, err error)
+	// AgentProcess reports a process that StartAgent started. It comes
+	// before any Stderr of that process.
+	AgentProcess(AgentProcess)
+	// Stderr reports stderr of a process that StartAgent started, in order.
+	// It must not block on anything that waits for that process to exit.
+	Stderr(Stderr)
 }
 
 // ModelReporter is an optional Sink extension that records the model and

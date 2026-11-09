@@ -959,6 +959,10 @@ func (s sink) SetModel(model string) {
 	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
 }
 
+func (s sink) AgentProcess(backend.AgentProcess) {}
+
+func (s sink) Stderr(backend.Stderr) {}
+
 var (
 	errSessionClosed       = errors.New("the agent session was closed")
 	errPermissionCancelled = errors.New("permission cancelled")
