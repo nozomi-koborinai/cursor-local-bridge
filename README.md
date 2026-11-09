@@ -137,6 +137,11 @@ Grok Bot (or any assistant that can run remote shell commands and receive a webh
 3. Open the routine's panel, run `clb webhook setup --test` in a local terminal, and paste the routine's Webhook URL and sender key at the hidden prompts. Never paste the sender key into a chat. The running daemon picks up the new settings automatically (see [Set up the webhook](#set-up-the-webhook)).
 4. Ask Grok Bot for a change in a local repository. It runs `clb launch --repo <path> "<prompt>"`, polls `clb status` and `clb logs`, asks you before running `clb approve` or `clb deny`, and sends `clb followup` or `clb stop`. When a run ends, the daemon posts to the webhook trigger (which must be reachable from your machine) and the routine sends you a short notice.
 
+### Operating long runs from a bot
+
+- **Pass absolute skill paths in prompts.** A local agent runs inside its worktree and only knows a skill's location when you give the full path (for example, `/Users/you/.cursor/skills/my-skill/SKILL.md`). If a prompt names a skill by title or relative path without its absolute path, the agent can spend minutes running broad filesystem searches such as `find /` to locate it.
+- **Keep handoff and artifact files out of `~/.clb`.** `~/.clb` (or `CLB_HOME`) holds the daemon's state: `config.json`, `clb.db`, `clb.sock`, `logs/`, and `worktrees/`. Tell the bot and the local agent to write handoff notes, reports, and other artifacts to the run's worktree or a dedicated workspace directory outside `~/.clb`.
+
 ## Run lifecycle
 
 | Status | Meaning |
@@ -225,6 +230,7 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 </details>
 
 - Empty fields (`summary`, `error`, `model`, `pendingPermission`) are omitted.
+- `model` is the model and effort requested for the run (from `clb launch --model`, `model` in `config.json`, the ACP session's parameterized config options, or `selectedModel` and `modelParameters` in `~/.cursor/cli-config.json`).
 - `summary` holds only the final assistant message from the run's most recent turn (or the last completed assistant message if the turn ended after a tool call with no further reply). Intermediate narration before tool calls and messages from earlier turns stay out of `summary`; run `clb logs <id>` to read the full multi-turn transcript.
 - `error` says why the run failed, including up to the first 512 bytes of agent stderr.
 - `pendingPermission` is the oldest unanswered permission request. `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. `clb approve` selects the option with `kind: "allow_once"` and `clb deny` selects `kind: "reject_once"` (or cancels if neither is offered).

@@ -47,6 +47,7 @@ type recorder struct {
 	mu     sync.Mutex
 	events []backend.Event
 	asked  []backend.PermissionRequest
+	model  string
 	answer func() (bool, error)
 }
 
@@ -54,6 +55,18 @@ func (r *recorder) Event(e backend.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, e)
+}
+
+func (r *recorder) SetModel(model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.model = model
+}
+
+func (r *recorder) reportedModel() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.model
 }
 
 func (r *recorder) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
@@ -407,15 +420,20 @@ func TestResumeDropsReplayedHistory(t *testing.T) {
 
 func TestModelReachesCommandLine(t *testing.T) {
 	state := useState(t)
-	start(t, &recorder{}, backend.StartOptions{Model: "gpt-5"})
+	sink := &recorder{}
+	const requested = "grok-4.6[effort=high,fast=false]"
+	start(t, sink, backend.StartOptions{Model: requested})
 
 	invs, err := fakeagenttest.Invocations(state)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--model", "gpt-5", "acp"}
+	want := []string{"--model", requested, "acp"}
 	if len(invs) != 1 || !reflect.DeepEqual(invs[0].Args, want) {
 		t.Errorf("invocations = %+v, want one with args %q", invs, want)
+	}
+	if got := sink.reportedModel(); got != requested {
+		t.Errorf("reported model = %q, want %q", got, requested)
 	}
 }
 

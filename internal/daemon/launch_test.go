@@ -1,12 +1,14 @@
 package daemon_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 )
 
@@ -83,4 +85,115 @@ func clbBranches(t *testing.T, repo string) string {
 		t.Fatalf("git branch: %v\n%s", err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func TestLaunchRecordsAndDisplaysRequestedModelLabel(t *testing.T) {
+	t.Run("launch flag overrides config and cli-config", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{"selectedModel":{"modelId":"grok-4.7","parameters":[{"id":"reasoning_effort","value":"medium"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, &fakeAgent{})
+		if err := os.WriteFile(filepath.Join(h.cfg.Home, "config.json"), []byte(`{"model":"composer-2.5"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		const requested = "claude-opus-5-5-xhigh"
+		run := h.must(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Prompt: "hi", Model: requested})
+		if run.Model != requested {
+			t.Fatalf("launched model = %q, want %q", run.Model, requested)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != requested {
+			t.Fatalf("status model = %q, want %q", done.Model, requested)
+		}
+		if opts := h.agent.session(0).startOptions(); opts.Model != requested {
+			t.Fatalf("start options model = %q, want %q", opts.Model, requested)
+		}
+		runs := h.list()
+		if len(runs) != 1 || runs[0].Model != requested {
+			t.Fatalf("list = %+v, want model %q", runs, requested)
+		}
+	})
+
+	t.Run("config.json model reloads without daemon restart", func(t *testing.T) {
+		t.Setenv("CURSOR_CONFIG_DIR", t.TempDir())
+		h := newHarness(t, &fakeAgent{})
+		const configured = "grok-4.6[effort=high,fast=false]"
+		if err := os.WriteFile(filepath.Join(h.cfg.Home, "config.json"), []byte(`{"model":"`+configured+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		run := h.launch("hi")
+		if run.Model != configured {
+			t.Fatalf("launched model = %q, want %q", run.Model, configured)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != configured {
+			t.Fatalf("finished model = %q, want %q", done.Model, configured)
+		}
+		if opts := h.agent.session(0).startOptions(); opts.Model != configured {
+			t.Fatalf("start options model = %q, want %q", opts.Model, configured)
+		}
+	})
+
+	t.Run("cli-config.json model and effort recorded when clb model is unset", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{
+			"model": {"modelId": "claude-opus-5-5-high", "displayModelId": "claude-opus-5-5", "displayName": "Claude Opus 5.5"},
+			"selectedModel": {
+				"modelId": "claude-opus-5-5",
+				"parameters": [
+					{"id": "context", "value": "300k"},
+					{"id": "effort", "value": "xhigh"},
+					{"id": "fast", "value": "false"}
+				]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, &fakeAgent{})
+
+		const want = "claude-opus-5-5[context=300k,effort=xhigh,fast=false]"
+		run := h.launch("hi")
+		if run.Model != want {
+			t.Fatalf("launched model = %q, want %q", run.Model, want)
+		}
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != want {
+			t.Fatalf("finished model = %q, want %q", done.Model, want)
+		}
+		if opts := h.agent.session(0).startOptions(); opts.Model != "" {
+			t.Fatalf("start options model = %q, want empty so the CLI uses its own config", opts.Model)
+		}
+		runs := h.list()
+		if len(runs) != 1 || runs[0].Model != want {
+			t.Fatalf("list = %+v, want model %q", runs, want)
+		}
+	})
+
+	t.Run("backend reports parameterized model and effort on session start", func(t *testing.T) {
+		t.Setenv("CURSOR_CONFIG_DIR", t.TempDir())
+		const reported = "claude-opus-5-5[context=300k,effort=xhigh,fast=false]"
+		agent := &fakeAgent{onStart: func(_ context.Context, s *fakeSession) {
+			if mr, ok := s.sink.(backend.ModelReporter); ok {
+				mr.SetModel(reported)
+			}
+		}}
+		h := newHarness(t, agent)
+
+		run := h.must(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Prompt: "hi", Model: "claude-opus-5-5"})
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != reported {
+			t.Fatalf("finished model = %q, want %q", done.Model, reported)
+		}
+		runs := h.list()
+		if len(runs) != 1 || runs[0].Model != reported {
+			t.Fatalf("list = %+v, want model %q", runs, reported)
+		}
+	})
 }

@@ -62,13 +62,13 @@ func TestCLB(t *testing.T) {
 	var hello, approved, denied, slow ipc.Run
 
 	step("launch runs to finished", func(t *testing.T) {
-		launched := c.run(t, "launch", "--repo", repo, "hello")
-		if launched.Status != "queued" || launched.Branch != "clb/"+launched.ID {
-			t.Errorf("launch printed %+v, want a queued run on branch clb/<id>", launched)
+		launched := c.run(t, "launch", "--repo", repo, "--model", "grok-4.6[effort=high,fast=false]", "hello")
+		if launched.Status != "queued" || launched.Branch != "clb/"+launched.ID || launched.Model != "grok-4.6[effort=high,fast=false]" {
+			t.Errorf("launch printed %+v, want a queued run on branch clb/<id> with requested model", launched)
 		}
 		hello = c.waitStatus(t, launched.ID, "finished")
-		if hello.Summary != "echo: hello" {
-			t.Errorf("summary = %q, want %q", hello.Summary, "echo: hello")
+		if hello.Summary != "echo: hello" || hello.Model != "grok-4.6[effort=high,fast=false]" {
+			t.Errorf("finished run = %+v, want summary %q and model %q", hello, "echo: hello", "grok-4.6[effort=high,fast=false]")
 		}
 	})
 
@@ -230,6 +230,9 @@ func TestCLB(t *testing.T) {
 		}
 		if want := []string{slow.ID, denied.ID, approved.ID, hello.ID}; !slices.Equal(ids, want) {
 			t.Errorf("list = %v, want %v", ids, want)
+		}
+		if got := runs[len(runs)-1].Model; got != "grok-4.6[effort=high,fast=false]" {
+			t.Errorf("list model = %q, want %q", got, "grok-4.6[effort=high,fast=false]")
 		}
 	})
 

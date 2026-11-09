@@ -177,7 +177,7 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 	default:
 		var run store.Run
 		if run, err = d.runCall(ctx, req); err == nil {
-			out := toIPCRun(run)
+			out := d.toIPCRun(run)
 			err = send(ipc.Response{Run: &out})
 		}
 	}
@@ -259,13 +259,25 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 		Branch:    "clb/" + string(id),
 		Worktree:  filepath.Join(d.cfg.WorktreeDir, string(id)),
 		Backend:   kind,
-		Model:     cmp.Or(req.Model, d.cfg.Model),
+		Model:     d.configuredModel(req.Model),
 		Lifecycle: lc,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	a := d.actor(id)
 	return a.call(ctx, func() error { return a.create(run, effects) })
+}
+
+func (d *Daemon) configuredModel(requested string) string {
+	if m := strings.TrimSpace(requested); m != "" {
+		return m
+	}
+	if d.cfg.Home != "" {
+		if loaded, err := config.Load(d.cfg.Home); err == nil && strings.TrimSpace(loaded.Model) != "" {
+			return strings.TrimSpace(loaded.Model)
+		}
+	}
+	return strings.TrimSpace(d.cfg.Model)
 }
 
 func (d *Daemon) command(ctx context.Context, id store.RunID, e lifecycle.Event) (store.Run, error) {
@@ -286,7 +298,7 @@ func (d *Daemon) list(ctx context.Context, send func(ipc.Response) error) error 
 	}
 	out := make([]ipc.Run, 0, len(runs))
 	for _, r := range runs {
-		out = append(out, toIPCRun(r))
+		out = append(out, d.toIPCRun(r))
 	}
 	return send(ipc.Response{Runs: out})
 }
@@ -353,7 +365,7 @@ func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 	return err
 }
 
-func toIPCRun(r store.Run) ipc.Run {
+func (d *Daemon) toIPCRun(r store.Run) ipc.Run {
 	out := ipc.Run{
 		ID:            string(r.ID),
 		Status:        string(r.Lifecycle.State),
@@ -362,7 +374,7 @@ func toIPCRun(r store.Run) ipc.Run {
 		Branch:        r.Branch,
 		Worktree:      r.Worktree,
 		Backend:       string(r.Backend),
-		Model:         r.Model,
+		Model:         cmp.Or(r.Model, config.CLIDefaultModel()),
 		SessionID:     r.SessionID,
 		Summary:       r.Summary,
 		Error:         r.Lifecycle.Error,

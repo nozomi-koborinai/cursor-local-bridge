@@ -199,7 +199,12 @@ func (s *Session) forward(stdout io.Reader) (*result, error) {
 	r := bufio.NewReader(stdout)
 	for {
 		line, err := r.ReadBytes('\n')
-		if ev, res, ok := parseLine(line); ok {
+		if ev, res, model, ok := parseLine(line); ok {
+			if model != "" {
+				if mr, ok := s.sink.(backend.ModelReporter); ok {
+					mr.SetModel(model)
+				}
+			}
 			s.sink.Event(ev)
 			if res != nil {
 				last = res
@@ -214,22 +219,29 @@ func (s *Session) forward(stdout io.Reader) (*result, error) {
 	}
 }
 
-func parseLine(line []byte) (backend.Event, *result, bool) {
+func parseLine(line []byte) (backend.Event, *result, string, bool) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
-		return backend.Event{}, nil, false
+		return backend.Event{}, nil, "", false
 	}
 	var head struct {
 		Type    string          `json:"type"`
+		Subtype string          `json:"subtype"`
+		Model   string          `json:"model"`
 		Message json.RawMessage `json:"message"`
 	}
 	if json.Unmarshal(line, &head) != nil || head.Type == "" {
 		data, _ := json.Marshal(string(line))
-		return backend.Event{Type: "stdout", Data: data}, nil, true
+		return backend.Event{Type: "stdout", Data: data}, nil, "", true
 	}
 	ev := backend.Event{Type: head.Type, Data: line}
 	var res *result
+	var model string
 	switch head.Type {
+	case "system":
+		if head.Subtype == "init" {
+			model = strings.TrimSpace(head.Model)
+		}
 	case "assistant":
 		text := assistantText(head.Message)
 		if backend.IsTransportError(text) {
@@ -243,7 +255,7 @@ func parseLine(line []byte) (backend.Event, *result, bool) {
 			res = &result{IsError: true, Result: "unreadable result line"}
 		}
 	}
-	return ev, res, true
+	return ev, res, model, true
 }
 
 func assistantText(message json.RawMessage) string {

@@ -47,12 +47,25 @@ type recorder struct {
 	t      *testing.T
 	mu     sync.Mutex
 	events []backend.Event
+	model  string
 }
 
 func (r *recorder) Event(e backend.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, e)
+}
+
+func (r *recorder) SetModel(model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.model = model
+}
+
+func (r *recorder) reportedModel() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.model
 }
 
 func (r *recorder) Permission(context.Context, backend.PermissionRequest) (bool, error) {
@@ -77,7 +90,7 @@ func (r *recorder) types() []string {
 func TestParseLineClassifiesTransportError(t *testing.T) {
 	const text = "RetriableError: http/2 stream closed"
 	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`)
-	ev, res, ok := parseLine(line)
+	ev, res, _, ok := parseLine(line)
 	if !ok || res != nil {
 		t.Fatalf("parse = ok %v res %v", ok, res)
 	}
@@ -89,7 +102,7 @@ func TestParseLineClassifiesTransportError(t *testing.T) {
 	}
 
 	ordinary := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`)
-	ev, _, ok = parseLine(ordinary)
+	ev, _, _, ok = parseLine(ordinary)
 	if !ok || ev.Type != "assistant" || ev.Text != "hello" {
 		t.Fatalf("ordinary = %+v ok %v", ev, ok)
 	}
@@ -171,6 +184,9 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 	}
 	if got := sink.text(); got != "echo: hello there" {
 		t.Errorf("text = %q, want %q", got, "echo: hello there")
+	}
+	if got := sink.reportedModel(); got != "gpt-5" {
+		t.Errorf("reported model = %q, want %q", got, "gpt-5")
 	}
 	var init struct {
 		SessionID string `json:"session_id"`

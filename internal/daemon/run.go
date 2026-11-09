@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
@@ -138,6 +140,7 @@ type generation struct {
 	cancel    context.CancelFunc
 	session   Session
 	closed    chan struct{}
+	model     string
 	turn      turnSummary
 	retries   int
 	answers   map[string]chan<- permResult
@@ -448,7 +451,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.d.wg.Go(func() {
 		defer close(g.closed)
 		sessionID, err := g.session.Start(ctx, opts)
-		a.postFrom(g, func() { a.started(sessionID, err) })
+		a.postFrom(g, func() { a.started(g, sessionID, err) })
 		<-ctx.Done()
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
@@ -468,12 +471,48 @@ func (a *actor) sweep(g *generation, dir string) {
 	}
 }
 
-func (a *actor) started(sessionID string, err error) {
+func (a *actor) started(g *generation, sessionID string, err error) {
 	if err != nil {
 		a.fail(fmt.Errorf("start agent: %w", err))
 		return
 	}
-	a.record(lifecycle.Started{}, func(r *store.Run) { r.SessionID = sessionID })
+	model := cmp.Or(g.model, config.CLIDefaultModel())
+	a.record(lifecycle.Started{}, func(r *store.Run) {
+		r.SessionID = sessionID
+		r.Model = mergeModelLabel(r.Model, model)
+	})
+}
+
+func (a *actor) setModel(g *generation, model string) {
+	g.model = model
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		a.d.log.Error("get run for model update", "run", a.id, "err", err)
+		return
+	}
+	next := mergeModelLabel(run.Model, model)
+	if next == run.Model {
+		return
+	}
+	run.Model = next
+	run.UpdatedAt = time.Now().UTC()
+	if _, err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
+		a.d.log.Error("update run model", "run", a.id, "err", err)
+	}
+}
+
+func mergeModelLabel(current, reported string) string {
+	reported = strings.TrimSpace(reported)
+	if reported == "" {
+		return current
+	}
+	if current == "" {
+		return reported
+	}
+	if !strings.Contains(current, "[") && strings.HasPrefix(reported, current+"[") {
+		return reported
+	}
+	return current
 }
 
 func (a *actor) sendPrompt(prompt string) {
@@ -877,6 +916,10 @@ type sink struct {
 
 func (s sink) Event(e backend.Event) {
 	s.a.postFrom(s.g, func() { s.a.agentEvent(s.g, e) })
+}
+
+func (s sink) SetModel(model string) {
+	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
 }
 
 var (
