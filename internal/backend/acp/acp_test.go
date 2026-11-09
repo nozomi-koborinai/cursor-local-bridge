@@ -46,6 +46,9 @@ func TestMain(m *testing.M) {
 type recorder struct {
 	mu     sync.Mutex
 	events []backend.Event
+	procs  []backend.AgentProcess
+	lines  []backend.Stderr
+	order  []string
 	asked  []backend.PermissionRequest
 	model  string
 	answer func() (bool, error)
@@ -69,9 +72,19 @@ func (r *recorder) reportedModel() string {
 	return r.model
 }
 
-func (r *recorder) AgentProcess(backend.AgentProcess) {}
+func (r *recorder) AgentProcess(p backend.AgentProcess) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.procs = append(r.procs, p)
+	r.order = append(r.order, "process")
+}
 
-func (r *recorder) Stderr(backend.Stderr) {}
+func (r *recorder) Stderr(l backend.Stderr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, l)
+	r.order = append(r.order, "stderr")
+}
 
 func (r *recorder) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
 	r.mu.Lock()
@@ -89,6 +102,24 @@ func (r *recorder) snapshot() []backend.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]backend.Event(nil), r.events...)
+}
+
+func (r *recorder) processes() []backend.AgentProcess {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]backend.AgentProcess(nil), r.procs...)
+}
+
+func (r *recorder) stderr() []backend.Stderr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]backend.Stderr(nil), r.lines...)
+}
+
+func (r *recorder) reportOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.order...)
 }
 
 func (r *recorder) permissions() []backend.PermissionRequest {
@@ -183,6 +214,13 @@ func TestPromptStreamsReply(t *testing.T) {
 	}
 	if asked := sink.permissions(); len(asked) != 0 {
 		t.Errorf("asked %d permissions for a plain prompt", len(asked))
+	}
+	procs := sink.processes()
+	if len(procs) != 1 || procs[0].Command != backend.CommandACP || procs[0].Version != "2026.01.01-fake" || procs[0].VersionErr != "" {
+		t.Errorf("processes = %+v, want one acp process at 2026.01.01-fake", procs)
+	}
+	if order := sink.reportOrder(); len(order) > 0 && order[0] != "process" {
+		t.Errorf("report order = %q, want the process first", order)
 	}
 }
 
@@ -392,6 +430,15 @@ func TestCrashFailsPrompt(t *testing.T) {
 		t.Errorf("error = %q, want the exit status and the agent's stderr", msg)
 	}
 	sink.waitText(t, "about to crash")
+	var saw bool
+	for _, line := range sink.stderr() {
+		if strings.Contains(line.Line, "crashing on purpose") && !line.Capped {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("stderr = %+v, want the crash line", sink.stderr())
+	}
 }
 
 func TestResumeDropsReplayedHistory(t *testing.T) {
@@ -447,10 +494,20 @@ func TestStartFailsWhenLoggedOut(t *testing.T) {
 	defer func(d time.Duration) { authTimeout = d }(authTimeout)
 	authTimeout = 200 * time.Millisecond
 
-	s := New(fakeAgent, &recorder{})
+	sink := &recorder{}
+	s := New(fakeAgent, sink)
 	_, err := s.Start(context.Background(), backend.StartOptions{Dir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "agent login") {
-		t.Fatalf("Start = %v, want an error that says to run agent login", err)
+	if err == nil || !strings.Contains(err.Error(), "agent login") || !strings.Contains(err.Error(), "not logged in") {
+		t.Fatalf("Start = %v, want the timeout and the stderr written before it", err)
+	}
+	var saw bool
+	for _, line := range sink.stderr() {
+		if strings.Contains(line.Line, "not logged in") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("stderr = %+v, want the line written before authenticate timed out", sink.stderr())
 	}
 	assertGone(t, lastPid(t, state))
 }

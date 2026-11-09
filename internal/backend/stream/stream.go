@@ -68,7 +68,7 @@ func (s *Session) createChat(ctx context.Context) (string, error) {
 	defer cancel()
 	cmd := exec.Command(s.agentPath, "create-chat")
 	cmd.Dir = s.dir
-	p, err := s.run(cmd)
+	p, err := s.run(ctx, cmd, backend.CommandCreateChat)
 	if err != nil {
 		return "", err
 	}
@@ -93,7 +93,8 @@ func (s *Session) createChat(ctx context.Context) (string, error) {
 		}
 		return "", p.Explain(errors.New("agent create-chat printed no chat ID"))
 	case <-ctx.Done():
-		return "", fmt.Errorf("agent create-chat: %w", ctx.Err())
+		p.Stop()
+		return "", p.Explain(fmt.Errorf("agent create-chat: %w", ctx.Err()))
 	}
 }
 
@@ -114,7 +115,7 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	args = append(args, "--resume", s.chatID, "--workspace", s.dir, "--", text)
 	cmd := exec.Command(s.agentPath, args...)
 	cmd.Dir = s.dir
-	p, err := s.run(cmd)
+	p, err := s.run(ctx, cmd, backend.CommandPrint)
 	if err != nil {
 		return err
 	}
@@ -139,7 +140,7 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	case exitErr != nil:
 		return p.Explain(fmt.Errorf("agent -p failed (%w)", exitErr))
 	case readErr != nil:
-		return fmt.Errorf("read agent -p output: %w", readErr)
+		return p.Explain(fmt.Errorf("read agent -p output: %w", readErr))
 	case res == nil:
 		return p.Explain(errors.New("agent -p exited without a result line"))
 	case res.IsError:
@@ -161,15 +162,23 @@ func (s *Session) Close() error {
 	return nil
 }
 
-func (s *Session) run(cmd *exec.Cmd) (*proc.Process, error) {
+func (s *Session) run(ctx context.Context, cmd *exec.Cmd, command backend.Command) (*proc.Process, error) {
+	// StartAgent probes the CLI version before the process exists, so it must
+	// not run while s.mu is held. Close during the probe is checked again
+	// after it returns.
+	if s.isClosed() {
+		return nil, errClosed
+	}
+	p, err := backend.StartAgent(ctx, cmd, command, s.sink)
+	if err != nil {
+		return nil, fmt.Errorf("start agent: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		p.Stop()
+		_ = p.Stdout.Close()
 		return nil, errClosed
-	}
-	p, err := proc.Start(cmd, nil)
-	if err != nil {
-		return nil, fmt.Errorf("start agent: %w", err)
 	}
 	s.running = p
 	return p, nil

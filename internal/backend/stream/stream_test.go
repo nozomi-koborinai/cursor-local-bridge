@@ -47,6 +47,9 @@ type recorder struct {
 	t      *testing.T
 	mu     sync.Mutex
 	events []backend.Event
+	procs  []backend.AgentProcess
+	lines  []backend.Stderr
+	order  []string
 	model  string
 }
 
@@ -68,9 +71,19 @@ func (r *recorder) reportedModel() string {
 	return r.model
 }
 
-func (r *recorder) AgentProcess(backend.AgentProcess) {}
+func (r *recorder) AgentProcess(p backend.AgentProcess) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.procs = append(r.procs, p)
+	r.order = append(r.order, "process")
+}
 
-func (r *recorder) Stderr(backend.Stderr) {}
+func (r *recorder) Stderr(l backend.Stderr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, l)
+	r.order = append(r.order, "stderr")
+}
 
 func (r *recorder) Permission(context.Context, backend.PermissionRequest) (bool, error) {
 	r.t.Error("print mode asked for a permission")
@@ -81,6 +94,24 @@ func (r *recorder) snapshot() []backend.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]backend.Event(nil), r.events...)
+}
+
+func (r *recorder) processes() []backend.AgentProcess {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]backend.AgentProcess(nil), r.procs...)
+}
+
+func (r *recorder) stderr() []backend.Stderr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]backend.Stderr(nil), r.lines...)
+}
+
+func (r *recorder) reportOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.order...)
 }
 
 func (r *recorder) types() []string {
@@ -178,6 +209,10 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 		t.Fatalf("invocations = %+v, want one create-chat", invs)
 	}
 	assertGone(t, invs[0].Pid)
+	procs := sink.processes()
+	if len(procs) != 1 || procs[0].Command != backend.CommandCreateChat || procs[0].Version != "2026.01.01-fake" || procs[0].PID != invs[0].Pid {
+		t.Fatalf("processes = %+v, want the create-chat process", procs)
+	}
 
 	if err := s.Prompt(context.Background(), "hello there"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -202,6 +237,10 @@ func TestStartCreatesChatAndPromptResumesIt(t *testing.T) {
 	want := []string{"-p", "--trust", "--output-format", "stream-json", "--model", "gpt-5", "--resume", id, "--workspace", dir, "--", "hello there"}
 	if len(invs) != 2 || !reflect.DeepEqual(invs[1].Args, want) {
 		t.Errorf("invocations = %+v, want a second one with args %q", invs, want)
+	}
+	procs = sink.processes()
+	if len(procs) != 2 || procs[1].Command != backend.CommandPrint || procs[1].PID != invs[1].Pid || procs[1].Version != "2026.01.01-fake" {
+		t.Errorf("processes = %+v, want a print process for the prompt", procs)
 	}
 }
 
@@ -297,7 +336,8 @@ func TestPromptFailures(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			useState(t)
-			s, _ := start(t, fakeAgent, &recorder{t: t}, backend.StartOptions{Dir: t.TempDir()}, true)
+			sink := &recorder{t: t}
+			s, _ := start(t, fakeAgent, sink, backend.StartOptions{Dir: t.TempDir()}, true)
 			if tt.loggedOut {
 				t.Setenv("FAKEAGENT_LOGGED_OUT", "1")
 			}
@@ -310,7 +350,34 @@ func TestPromptFailures(t *testing.T) {
 					t.Errorf("error = %q, want it to contain %q", err, w)
 				}
 			}
+			if tt.name == "crash" {
+				var saw bool
+				for _, line := range sink.stderr() {
+					if strings.Contains(line.Line, "crashing on purpose") {
+						saw = true
+					}
+				}
+				if !saw {
+					t.Errorf("stderr = %+v, want the crash line", sink.stderr())
+				}
+			}
 		})
+	}
+}
+
+func TestCreateChatTimeoutIncludesStderr(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "agent")
+	body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 2026.01.01-fake\n  exit 0\nfi\necho 'diag: waiting' >&2\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	s := New(script, &recorder{t: t}, false)
+	t.Cleanup(func() { _ = s.Close() })
+	_, err := s.Start(ctx, backend.StartOptions{Dir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "diag: waiting") || !strings.Contains(err.Error(), "agent create-chat:") {
+		t.Fatalf("Start = %v, want the timeout and the stderr written before it", err)
 	}
 }
 
