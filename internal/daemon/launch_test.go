@@ -225,4 +225,69 @@ func TestLaunchRecordsAndDisplaysRequestedModelLabel(t *testing.T) {
 			t.Fatalf("list = %+v, want model %q", runs, reported)
 		}
 	})
+
+	t.Run("later cli-config.json edits do not relabel historical runs", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		h := newHarness(t, &fakeAgent{})
+
+		unconfigured := h.launch("first")
+		if unconfigured.Model != "" {
+			t.Fatalf("launched model without config = %q, want empty", unconfigured.Model)
+		}
+		if done := h.waitStatus(unconfigured.ID, "finished"); done.Model != "" {
+			t.Fatalf("finished model without config = %q, want empty", done.Model)
+		}
+
+		cliCfg := `{"selectedModel":{"modelId":"grok-4.7","parameters":[{"id":"reasoning_effort","value":"high"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.must(ipc.Request{Method: ipc.MethodStatus, RunID: unconfigured.ID}).Model; got != "" {
+			t.Fatalf("historical run status model after cli-config edit = %q, want empty", got)
+		}
+		if runs := h.list(); len(runs) != 1 || runs[0].Model != "" {
+			t.Fatalf("historical run list after cli-config edit = %+v, want empty model", runs)
+		}
+	})
+
+	t.Run("reported model during prompt overrides parameterized cli-config default", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{"selectedModel":{"modelId":"grok-4.7","parameters":[{"id":"reasoning_effort","value":"medium"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const reported = "Claude 4 Sonnet"
+		agent := &fakeAgent{onPrompt: func(ctx context.Context, s *fakeSession, prompt string) error {
+			if mr, ok := s.sink.(backend.ModelReporter); ok {
+				mr.SetModel(reported)
+			}
+			return echo(ctx, s, prompt)
+		}}
+		h := newHarness(t, agent)
+
+		run := h.launch("hi")
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != reported {
+			t.Fatalf("finished model = %q, want %q", done.Model, reported)
+		}
+	})
+
+	t.Run("bare requested model ignores unrequested cli-config parameters", func(t *testing.T) {
+		cursorDir := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", cursorDir)
+		cliCfg := `{"selectedModel":{"modelId":"claude-opus-5-5","parameters":[{"id":"effort","value":"low"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(cliCfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := newHarness(t, &fakeAgent{})
+
+		const requested = "claude-opus-5-5"
+		run := h.must(ipc.Request{Method: ipc.MethodLaunch, Repo: h.repo, Prompt: "hi", Model: requested})
+		done := h.waitStatus(run.ID, "finished")
+		if done.Model != requested {
+			t.Fatalf("finished model = %q, want %q", done.Model, requested)
+		}
+	})
 }

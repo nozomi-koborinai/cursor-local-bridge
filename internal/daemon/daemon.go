@@ -177,7 +177,7 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 	default:
 		var run store.Run
 		if run, err = d.runCall(ctx, req); err == nil {
-			out := d.toIPCRun(run)
+			out := toIPCRun(run)
 			err = send(ipc.Response{Run: &out})
 		}
 	}
@@ -252,6 +252,11 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	}
 	now := time.Now().UTC()
 	lc, effects := lifecycle.Launch(req.Prompt)
+	requested := d.configuredModel(req.Model)
+	model := requested
+	if model == "" {
+		model = config.CLIDefaultModel()
+	}
 	run := store.Run{
 		ID:        id,
 		Repo:      repo,
@@ -259,13 +264,13 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 		Branch:    "clb/" + string(id),
 		Worktree:  filepath.Join(d.cfg.WorktreeDir, string(id)),
 		Backend:   kind,
-		Model:     d.configuredModel(req.Model),
+		Model:     model,
 		Lifecycle: lc,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	a := d.actor(id)
-	return a.call(ctx, func() error { return a.create(run, effects) })
+	return a.call(ctx, func() error { return a.create(run, requested, effects) })
 }
 
 func (d *Daemon) configuredModel(requested string) string {
@@ -298,7 +303,7 @@ func (d *Daemon) list(ctx context.Context, send func(ipc.Response) error) error 
 	}
 	out := make([]ipc.Run, 0, len(runs))
 	for _, r := range runs {
-		out = append(out, d.toIPCRun(r))
+		out = append(out, toIPCRun(r))
 	}
 	return send(ipc.Response{Runs: out})
 }
@@ -365,7 +370,7 @@ func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 	return err
 }
 
-func (d *Daemon) toIPCRun(r store.Run) ipc.Run {
+func toIPCRun(r store.Run) ipc.Run {
 	out := ipc.Run{
 		ID:            string(r.ID),
 		Status:        string(r.Lifecycle.State),
@@ -374,7 +379,7 @@ func (d *Daemon) toIPCRun(r store.Run) ipc.Run {
 		Branch:        r.Branch,
 		Worktree:      r.Worktree,
 		Backend:       string(r.Backend),
-		Model:         cmp.Or(r.Model, config.CLIDefaultModel()),
+		Model:         r.Model,
 		SessionID:     r.SessionID,
 		Summary:       r.Summary,
 		Error:         r.Lifecycle.Error,

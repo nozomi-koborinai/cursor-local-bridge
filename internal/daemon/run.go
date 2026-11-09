@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
-	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
@@ -125,12 +123,14 @@ type actor struct {
 	gen *generation
 	// closing is the last closed generation. Its agent may still be
 	// shutting down.
-	closing     *generation
-	state       lifecycle.State
-	stall       *time.Timer
-	perms       int
-	permRetries map[string]int
-	carried     []store.NewEvent
+	closing        *generation
+	state          lifecycle.State
+	stall          *time.Timer
+	launched       bool
+	requestedModel string
+	perms          int
+	permRetries    map[string]int
+	carried        []store.NewEvent
 }
 
 // generation is one agent session of a run. Everything a session reports
@@ -221,7 +221,9 @@ func (a *actor) call(ctx context.Context, f func() error) (store.Run, error) {
 	}
 }
 
-func (a *actor) create(run store.Run, effects []lifecycle.Effect) error {
+func (a *actor) create(run store.Run, requestedModel string, effects []lifecycle.Effect) error {
+	a.launched = true
+	a.requestedModel = requestedModel
 	if err := a.d.store.CreateRun(a.d.writes, run); err != nil {
 		return err
 	}
@@ -444,7 +446,11 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.sweeper = g
 	a.sweepMu.Unlock()
 
-	opts := backend.StartOptions{Dir: run.Worktree, Model: run.Model}
+	model := run.Model
+	if a.launched {
+		model = a.requestedModel
+	}
+	opts := backend.StartOptions{Dir: run.Worktree, Model: model}
 	if resume {
 		opts.ResumeSessionID = run.SessionID
 	}
@@ -476,10 +482,11 @@ func (a *actor) started(g *generation, sessionID string, err error) {
 		a.fail(fmt.Errorf("start agent: %w", err))
 		return
 	}
-	model := cmp.Or(g.model, config.CLIDefaultModel())
 	a.record(lifecycle.Started{}, func(r *store.Run) {
 		r.SessionID = sessionID
-		r.Model = mergeModelLabel(r.Model, model)
+		if g.model != "" {
+			r.Model = a.mergeModel(r.Model, g.model)
+		}
 	})
 }
 
@@ -490,7 +497,7 @@ func (a *actor) setModel(g *generation, model string) {
 		a.d.log.Error("get run for model update", "run", a.id, "err", err)
 		return
 	}
-	next := mergeModelLabel(run.Model, model)
+	next := a.mergeModel(run.Model, model)
 	if next == run.Model {
 		return
 	}
@@ -501,10 +508,16 @@ func (a *actor) setModel(g *generation, model string) {
 	}
 }
 
-func mergeModelLabel(current, reported string) string {
+func (a *actor) mergeModel(current, reported string) string {
 	reported = strings.TrimSpace(reported)
 	if reported == "" {
 		return current
+	}
+	if a.launched && a.requestedModel == "" {
+		if !strings.Contains(reported, "[") && strings.HasPrefix(current, reported+"[") {
+			return current
+		}
+		return reported
 	}
 	if current == "" {
 		return reported
