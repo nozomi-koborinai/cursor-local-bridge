@@ -420,6 +420,147 @@ func TestAddStartsAtABaseRefThatLooksLikeAFlag(t *testing.T) {
 	}
 }
 
+func TestExists(t *testing.T) {
+	dir := t.TempDir()
+	ok, err := Exists(dir)
+	if err != nil || !ok {
+		t.Fatalf("dir = %v, %v; want present", ok, err)
+	}
+	file := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = Exists(file)
+	if err != nil || !ok {
+		t.Fatalf("file = %v, %v; want present", ok, err)
+	}
+	ok, err = Exists(filepath.Join(dir, "missing"))
+	if err != nil || ok {
+		t.Fatalf("missing = %v, %v; want absent", ok, err)
+	}
+}
+
+func TestBranchExists(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := t.Context()
+	ok, err := BranchExists(ctx, repo, "")
+	if err != nil || ok {
+		t.Fatalf("empty name = %v, %v; want absent", ok, err)
+	}
+	ok, err = BranchExists(ctx, repo, "main")
+	if err != nil || !ok {
+		t.Fatalf("main = %v, %v; want present", ok, err)
+	}
+	ok, err = BranchExists(ctx, repo, "no-such")
+	if err != nil || ok {
+		t.Fatalf("missing = %v, %v; want absent", ok, err)
+	}
+}
+
+func TestRemoveEmptyPath(t *testing.T) {
+	if err := Remove(t.Context(), t.TempDir(), ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscardDropsUncommittedWork(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "wt")
+	const branch = "clb/run-discard"
+	if err := Add(ctx, repo, path, branch, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "note.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Discard(ctx, repo, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat = %v, want the worktree gone", err)
+	}
+	if got := gitOut(t, repo, "rev-parse", branch); got != head {
+		t.Fatalf("branch tip = %s, want %s with the dirty file dropped", got, head)
+	}
+	if names := gitOut(t, repo, "ls-tree", "-r", "--name-only", branch); strings.Contains(names, "note.txt") {
+		t.Fatalf("tree = %q, want the dirty file left out", names)
+	}
+	if err := Discard(ctx, repo, path); err != nil {
+		t.Fatalf("second discard: %v", err)
+	}
+}
+
+func TestDiscardRemovesAnUnregisteredDirectory(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "wt")
+	if err := Add(ctx, repo, path, "clb/run-forgot", head); err != nil {
+		t.Fatal(err)
+	}
+	aside := path + "-aside"
+	if err := os.Rename(path, aside); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, repo, "worktree", "prune")
+	if err := os.Rename(aside, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "left.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Discard(ctx, repo, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat = %v, want the unregistered directory gone", err)
+	}
+}
+
+func TestDiscardEmptyPath(t *testing.T) {
+	if err := Discard(t.Context(), t.TempDir(), ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteBranchRemovesCommitsAndIsIdempotent(t *testing.T) {
+	repo, head := newRepo(t)
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "wt")
+	const branch = "clb/run-delete"
+	if err := Add(ctx, repo, path, branch, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "note.txt"), []byte("saved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, path, "add", "note.txt")
+	gitOut(t, path, "commit", "-m", "note")
+	if err := Discard(ctx, repo, path); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := BranchExists(ctx, repo, branch)
+	if err != nil || !ok {
+		t.Fatalf("branch before delete = %v, %v; want it present", ok, err)
+	}
+	if err := DeleteBranch(ctx, repo, branch); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = BranchExists(ctx, repo, branch)
+	if err != nil || ok {
+		t.Fatalf("branch after delete = %v, %v; want it gone", ok, err)
+	}
+	if err := DeleteBranch(ctx, repo, branch); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	if err := DeleteBranch(ctx, repo, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOut(t, repo, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD = %s, want %s", got, head)
+	}
+}
+
 func writeHook(t *testing.T, worktree, body string) {
 	t.Helper()
 	hook := gitOut(t, worktree, "rev-parse", "--git-path", "hooks/pre-commit")

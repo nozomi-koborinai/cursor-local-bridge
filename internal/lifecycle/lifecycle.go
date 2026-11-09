@@ -99,8 +99,9 @@ type Run struct {
 	Permissions []Permission
 	// Error is non-empty exactly when State is Failed.
 	Error string
-	// Stopped reports that Stop has been run on a failed run, so FollowUp
-	// cannot resume it even though State stays Failed.
+	// Stopped reports that Stop or clean has released the run's checkout, so
+	// FollowUp cannot resume a finished or failed run after its worktree or
+	// branch is gone.
 	Stopped bool
 }
 
@@ -283,9 +284,7 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		case Queued, Running, AwaitingPermission:
 			r.Prompts = append(clone(r.Prompts), e.Prompt)
 			return r, nil, nil
-		case Finished:
-			return Run{State: Queued, Prompts: []string{e.Prompt}}, []Effect{StartBackend{Resume: true}}, nil
-		case Failed:
+		case Finished, Failed:
 			if r.Stopped {
 				return r, nil, notAllowed("follow up on", Stopped)
 			}

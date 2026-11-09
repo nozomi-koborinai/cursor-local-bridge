@@ -59,6 +59,9 @@ type StartOptions struct {
 	// Model is passed to the CLI as --model when not empty.
 	Model           string
 	ResumeSessionID string
+	// ProcFile, when not empty, records the running agent process so a new
+	// daemon can stop it if this daemon crashes.
+	ProcFile string
 }
 
 // EventTransportError is the Event.Type for a transport error (such as
@@ -140,6 +143,12 @@ type Sink interface {
 // effort resolved for the session.
 type ModelReporter interface {
 	SetModel(model string)
+}
+
+// ProcRecorder is an optional Sink extension that names the directory where
+// StartAgent records running agent processes for crash recovery.
+type ProcRecorder interface {
+	ProcDir() string
 }
 
 // DecisionSink is an optional extension of Sink that returns the full

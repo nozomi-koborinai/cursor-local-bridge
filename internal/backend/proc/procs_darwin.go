@@ -104,6 +104,11 @@ func identity(pid int) (id, parent uint64, err error) {
 	return binary.NativeEndian.Uint64(info[16:]), binary.NativeEndian.Uint64(info[24:]), nil
 }
 
+func processIdentity(pid int) (uint64, error) {
+	id, _, err := identity(pid)
+	return id, err
+}
+
 // pidInfo calls proc_info, the system call behind libproc's proc_pidinfo.
 func pidInfo(pid, flavor int, info []byte) error {
 	//nolint:staticcheck // x/sys/unix wraps no libSystem call for proc_info, and this package does not use cgo.

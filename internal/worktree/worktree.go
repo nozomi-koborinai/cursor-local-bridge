@@ -36,7 +36,7 @@ func Add(ctx context.Context, repo, path, branch, baseRef string) error {
 	if registered {
 		return nil
 	}
-	exists, err := branchExists(ctx, repo, branch)
+	exists, err := BranchExists(ctx, repo, branch)
 	if err != nil {
 		return err
 	}
@@ -80,8 +80,11 @@ func ResolveCommit(ctx context.Context, repo, ref string) (string, error) {
 // branch and its commits stay. Changes that are not committed yet are
 // committed onto the worktree's branch first. Ignored files are left out of
 // that commit. If the commit fails, the worktree stays. Removing a worktree
-// that no longer exists succeeds.
+// that no longer exists succeeds. An empty path does nothing.
 func Remove(ctx context.Context, repo, path string) error {
+	if path == "" {
+		return nil
+	}
 	if _, err := os.Lstat(path); err == nil {
 		if err := saveUncommitted(ctx, path); err != nil {
 			return err
@@ -94,6 +97,63 @@ func Remove(ctx context.Context, repo, path string) error {
 	}
 	_, err := git(ctx, repo, "worktree", "prune")
 	return err
+}
+
+// Discard removes the worktree at path without committing. An empty path
+// does nothing. A path git no longer lists is deleted from disk. A missing
+// path succeeds. Discard then prunes git's worktree records.
+func Discard(ctx context.Context, repo, path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Lstat(path); err == nil {
+		if _, rmErr := git(ctx, repo, "worktree", "remove", "--force", path); rmErr != nil {
+			registered, err := isWorktree(ctx, repo, path)
+			if err != nil {
+				return err
+			}
+			if registered {
+				return rmErr
+			}
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	_, err := git(ctx, repo, "worktree", "prune")
+	return err
+}
+
+// DeleteBranch deletes branch. An empty name, or a branch that is already
+// gone, succeeds. Git refuses to delete a branch that is still checked out,
+// so the caller removes the worktree first.
+func DeleteBranch(ctx context.Context, repo, branch string) error {
+	if branch == "" {
+		return nil
+	}
+	exists, err := BranchExists(ctx, repo, branch)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	_, err = git(ctx, repo, "branch", "-D", "--end-of-options", branch)
+	return err
+}
+
+// Exists reports whether path is present. A missing path is false, not an error.
+func Exists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
 const saveMessage = "clb: save uncommitted changes before removing the worktree"
@@ -184,7 +244,12 @@ func isWorktree(ctx context.Context, repo, path string) (bool, error) {
 	return false, nil
 }
 
-func branchExists(ctx context.Context, repo, branch string) (bool, error) {
+// BranchExists reports whether repo has a local branch of that name.
+// An empty name does not.
+func BranchExists(ctx context.Context, repo, branch string) (bool, error) {
+	if branch == "" {
+		return false, nil
+	}
 	ref := "refs/heads/" + branch
 	cmd := exec.CommandContext(ctx, "git", "-C", repo, "show-ref", "--verify", "--quiet", ref)
 	var stderr bytes.Buffer

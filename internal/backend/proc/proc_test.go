@@ -498,6 +498,48 @@ func TestExplainUnchangedWhenLinesAreForwarded(t *testing.T) {
 	}
 }
 
+func TestStopDoesNotDeleteANewerProcessRecord(t *testing.T) {
+	recordDir := filepath.Join(t.TempDir(), "procs", "run-1")
+	workDir := t.TempDir()
+	cmd1 := exec.Command("sleep", "120")
+	cmd1.Dir = workDir
+	p1, err := StartRecorded(cmd1, recordDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = p1.Stdout.Close()
+
+	cmd2 := exec.Command("sleep", "120")
+	cmd2.Dir = workDir
+	p2, err := StartRecorded(cmd2, recordDir, nil)
+	if err != nil {
+		p1.Stop()
+		t.Fatal(err)
+	}
+	_ = p2.Stdout.Close()
+	t.Cleanup(p2.Stop)
+
+	p2Data, err := os.ReadFile(p2.recordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p1.recordFile, p2Data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p1.Stop()
+
+	if _, err := os.Stat(p2.recordFile); err != nil {
+		t.Fatalf("p2 record after p1.Stop: %v", err)
+	}
+	if _, err := os.Stat(p1.recordFile); err != nil {
+		t.Fatalf("overwritten record after p1.Stop: %v, want kept when mark differs", err)
+	}
+
+	EndRecorded(recordDir)
+	waitGone(t, p2.PID(), "the newer recorded process")
+}
+
 func collectStderr(t *testing.T, raw string) []StderrLine {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "stderr.bin")

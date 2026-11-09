@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -145,8 +146,10 @@ func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
 // store. Call it before Serve. Calling it again changes nothing.
 //
 // A run's agent runs in its own process group, so it and its commands can
-// outlive a daemon crash. Recover ends the processes working in the
-// worktree of each run it fails.
+// outlive a daemon crash. Recover ends the recorded agent process group and
+// token-bearing descendants of each active run, and for a worktree run also
+// ends the processes working in its worktree. A run without a worktree keeps
+// the directory the user named, so Recover does not sweep that directory.
 func (d *Daemon) Recover(ctx context.Context) error {
 	runs, err := d.store.ListRuns(ctx)
 	if err != nil {
@@ -154,7 +157,10 @@ func (d *Daemon) Recover(ctx context.Context) error {
 	}
 	for _, r := range runs {
 		if r.Lifecycle.State.Active() {
-			proc.EndUnder(r.Worktree)
+			proc.EndRecorded(d.procFile(r.ID))
+			if r.HasWorktree() {
+				proc.EndUnder(r.Worktree)
+			}
 			restarted := lifecycle.BackendFailed{Err: "daemon restarted while the run was active"}
 			if _, err := d.command(ctx, r.ID, restarted); err != nil {
 				return fmt.Errorf("fail run %s: %w", r.ID, err)
@@ -167,6 +173,13 @@ func (d *Daemon) Recover(ctx context.Context) error {
 	return nil
 }
 
+func (d *Daemon) procFile(id store.RunID) string {
+	if d.cfg.Home == "" {
+		return ""
+	}
+	return filepath.Join(d.cfg.Home, "procs", string(id))
+}
+
 func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Response) error) error {
 	var err error
 	switch req.Method {
@@ -174,6 +187,8 @@ func (d *Daemon) handle(ctx context.Context, req ipc.Request, send func(ipc.Resp
 		err = d.list(ctx, send)
 	case ipc.MethodLogs:
 		err = d.logs(ctx, store.RunID(req.RunID), req.Follow, send)
+	case ipc.MethodClean:
+		err = d.clean(ctx, req.DryRun, send)
 	default:
 		var run store.Run
 		if run, err = d.runCall(ctx, req); err == nil {
@@ -250,16 +265,9 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	if !filepath.IsAbs(req.Repo) {
 		return store.Run{}, invalid(fmt.Sprintf("repo %q is not an absolute path", req.Repo))
 	}
-	repo, err := worktree.Root(ctx, req.Repo)
+	repo, ref, err := launchCheckout(ctx, req)
 	if err != nil {
-		return store.Run{}, invalid(err.Error())
-	}
-	ref := cmp.Or(req.Ref, "HEAD")
-	if strings.HasPrefix(ref, "-") {
-		return store.Run{}, invalid(fmt.Sprintf("ref %q starts with %q", ref, "-"))
-	}
-	if _, err := worktree.ResolveCommit(ctx, repo, ref); err != nil {
-		return store.Run{}, invalid(fmt.Sprintf("ref %q does not name a commit", ref))
+		return store.Run{}, err
 	}
 	kind := d.cfg.Backend
 	if req.Backend != "" {
@@ -284,12 +292,17 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	if display == "" {
 		display = config.CLIDefaultModel()
 	}
+	branch, worktreePath := "", ""
+	if !req.NoWorktree {
+		branch = "clb/" + string(id)
+		worktreePath = filepath.Join(d.cfg.WorktreeDir, string(id))
+	}
 	run := store.Run{
 		ID:        id,
 		Repo:      repo,
 		BaseRef:   ref,
-		Branch:    "clb/" + string(id),
-		Worktree:  filepath.Join(d.cfg.WorktreeDir, string(id)),
+		Branch:    branch,
+		Worktree:  worktreePath,
 		Backend:   kind,
 		Model:     encodeRunModel(requested, display),
 		Lifecycle: lc,
@@ -320,6 +333,38 @@ func cleanModel(s string) string {
 	return s
 }
 
+func launchCheckout(ctx context.Context, req ipc.Request) (repo, ref string, err error) {
+	if req.NoWorktree {
+		if req.Ref != "" {
+			return "", "", invalid("ref cannot be used with --no-worktree")
+		}
+		info, statErr := os.Stat(req.Repo)
+		if statErr != nil {
+			return "", "", invalid(statErr.Error())
+		}
+		if !info.IsDir() {
+			return "", "", invalid(fmt.Sprintf("repo %q is not a directory", req.Repo))
+		}
+		repo, err = filepath.EvalSymlinks(req.Repo)
+		if err != nil {
+			return "", "", invalid(err.Error())
+		}
+		return repo, "", nil
+	}
+	repo, err = worktree.Root(ctx, req.Repo)
+	if err != nil {
+		return "", "", invalid(err.Error())
+	}
+	ref = cmp.Or(req.Ref, "HEAD")
+	if strings.HasPrefix(ref, "-") {
+		return "", "", invalid(fmt.Sprintf("ref %q starts with %q", ref, "-"))
+	}
+	if _, err = worktree.ResolveCommit(ctx, repo, ref); err != nil {
+		return "", "", invalid(fmt.Sprintf("ref %q does not name a commit", ref))
+	}
+	return repo, ref, nil
+}
+
 func (d *Daemon) command(ctx context.Context, id store.RunID, e lifecycle.Event) (store.Run, error) {
 	if _, err := d.store.GetRun(ctx, id); err != nil {
 		return store.Run{}, err
@@ -341,6 +386,97 @@ func (d *Daemon) list(ctx context.Context, send func(ipc.Response) error) error 
 		out = append(out, toIPCRun(r))
 	}
 	return send(ipc.Response{Runs: out})
+}
+
+func (d *Daemon) clean(ctx context.Context, dryRun bool, send func(ipc.Response) error) error {
+	runs, err := d.store.ListRuns(ctx)
+	if err != nil {
+		return err
+	}
+	cleaned := []ipc.CleanedRun{}
+	for _, r := range runs {
+		if r.Lifecycle.State.Active() || !r.HasWorktree() {
+			continue
+		}
+		item, ok, err := d.cleanOne(ctx, r.ID, dryRun)
+		if err != nil {
+			return err
+		}
+		if ok {
+			cleaned = append(cleaned, item)
+		}
+	}
+	return send(ipc.Response{Clean: &ipc.CleanResult{DryRun: dryRun, Runs: cleaned}})
+}
+
+func (d *Daemon) cleanOne(ctx context.Context, id store.RunID, dryRun bool) (ipc.CleanedRun, bool, error) {
+	a := d.actor(id)
+	var (
+		item ipc.CleanedRun
+		ok   bool
+	)
+	_, err := a.call(ctx, func() error {
+		run, err := d.store.GetRun(d.writes, id)
+		if err != nil {
+			return err
+		}
+		if run.Lifecycle.State.Active() || !run.HasWorktree() {
+			return nil
+		}
+		a.awaitClosed()
+		wtExists, err := worktree.Exists(run.Worktree)
+		if err != nil {
+			return err
+		}
+		cleanCtx, cancel := context.WithTimeout(a.d.writes, removeTimeout)
+		defer cancel()
+		brExists, err := worktree.BranchExists(cleanCtx, run.Repo, run.Branch)
+		if err != nil {
+			return err
+		}
+		if !wtExists && !brExists {
+			return nil
+		}
+		item = ipc.CleanedRun{
+			ID:     string(run.ID),
+			Status: string(run.Lifecycle.State),
+			Repo:   run.Repo,
+		}
+		if wtExists {
+			item.Worktree = run.Worktree
+		}
+		if brExists {
+			item.Branch = run.Branch
+		}
+		if dryRun {
+			ok = true
+			return nil
+		}
+		if wtExists {
+			proc.EndUnder(run.Worktree)
+		}
+		if err := worktree.Discard(cleanCtx, run.Repo, run.Worktree); err != nil {
+			return fmt.Errorf("discard worktree: %w", err)
+		}
+		if brExists {
+			if err := worktree.DeleteBranch(cleanCtx, run.Repo, run.Branch); err != nil {
+				return fmt.Errorf("delete branch: %w", err)
+			}
+		}
+		if !run.Lifecycle.Stopped {
+			run.Lifecycle.Stopped = true
+			run.UpdatedAt = time.Now().UTC()
+			if _, err := d.store.UpdateRun(d.writes, run); err != nil {
+				return err
+			}
+		}
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return ipc.CleanedRun{}, false, err
+	}
+	return item, ok, nil
 }
 
 const logPollInterval = 200 * time.Millisecond

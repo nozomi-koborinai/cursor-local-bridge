@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -456,10 +457,14 @@ const removeTimeout = time.Minute
 // the removal's error, if any, for the caller of the command.
 func (a *actor) removeWorktree(run store.Run) error {
 	a.awaitClosed()
-	proc.EndUnder(run.Worktree)
-	ctx, cancel := context.WithTimeout(a.d.writes, removeTimeout)
-	err := worktree.Remove(ctx, run.Repo, run.Worktree)
-	cancel()
+	proc.EndRecorded(a.d.procFile(run.ID))
+	var err error
+	if run.HasWorktree() {
+		proc.EndUnder(run.Worktree)
+		ctx, cancel := context.WithTimeout(a.d.writes, removeTimeout)
+		err = worktree.Remove(ctx, run.Repo, run.Worktree)
+		cancel()
+	}
 	var outcome lifecycle.Event = lifecycle.WorktreeRemoved{}
 	if err != nil {
 		err = fmt.Errorf("remove worktree: %w", err)
@@ -471,12 +476,19 @@ func (a *actor) removeWorktree(run store.Run) error {
 	return err
 }
 
-// startBackend creates the worktree on the run's goroutine, so a stop can
-// never interleave with it, then starts the session in the background.
+// startBackend prepares the run's directory on the run's goroutine, so a
+// stop can never interleave with it, then starts the session in the
+// background.
 func (a *actor) startBackend(run store.Run, resume bool) {
 	a.awaitClosed()
-	if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
-		a.fail(fmt.Errorf("create worktree: %w", err))
+	proc.EndRecorded(a.d.procFile(run.ID))
+	if run.HasWorktree() {
+		if err := worktree.Add(a.d.ctx, run.Repo, run.Worktree, run.Branch, run.BaseRef); err != nil {
+			a.fail(fmt.Errorf("create worktree: %w", err))
+			return
+		}
+	} else if err := requireDir(run.Repo); err != nil {
+		a.fail(err)
 		return
 	}
 	newSession := a.d.backends[run.Backend]
@@ -493,7 +505,7 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.sweepMu.Unlock()
 
 	requested, _ := splitRunModel(run.Model)
-	opts := backend.StartOptions{Dir: run.Worktree, Model: requested}
+	opts := backend.StartOptions{Dir: run.Dir(), Model: requested, ProcFile: a.d.procFile(run.ID)}
 	if resume {
 		opts.ResumeSessionID = run.SessionID
 	}
@@ -505,8 +517,21 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
 		}
-		a.sweep(g, run.Worktree)
+		if run.HasWorktree() {
+			a.sweep(g, run.Worktree)
+		}
 	})
+}
+
+func requireDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	return nil
 }
 
 // sweep ends the processes left in dir unless a newer generation than g has
@@ -515,9 +540,10 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 func (a *actor) sweep(g *generation, dir string) {
 	a.sweepMu.Lock()
 	defer a.sweepMu.Unlock()
-	if a.sweeper == g {
-		proc.EndUnder(dir)
+	if dir == "" || a.sweeper != g {
+		return
 	}
+	proc.EndUnder(dir)
 }
 
 func (a *actor) started(g *generation, sessionID string, err error) {
@@ -1001,6 +1027,10 @@ func (s sink) Event(e backend.Event) {
 
 func (s sink) SetModel(model string) {
 	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
+}
+
+func (s sink) ProcDir() string {
+	return s.a.d.procFile(s.a.id)
 }
 
 func (s sink) AgentProcess(p backend.AgentProcess) {

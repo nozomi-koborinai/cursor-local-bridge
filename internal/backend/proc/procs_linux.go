@@ -1,8 +1,11 @@
 package proc
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -35,4 +38,20 @@ func environOf(pid int) ([]byte, error) {
 
 func cwdOf(pid int) (string, error) {
 	return os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
+}
+
+func processIdentity(pid int) (uint64, error) {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	i := bytes.LastIndexByte(data, ')')
+	if i < 0 {
+		return 0, errors.New("malformed stat")
+	}
+	fields := strings.Fields(string(data[i+1:]))
+	if len(fields) <= 19 {
+		return 0, errors.New("short stat")
+	}
+	return strconv.ParseUint(fields[19], 10, 64)
 }

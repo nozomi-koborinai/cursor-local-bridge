@@ -130,7 +130,7 @@ type Payload struct {
 	RunID        string      `json:"id"`
 	Status       string      `json:"status"`
 	Repo         string      `json:"repo"`
-	Branch       string      `json:"branch"`
+	Branch       string      `json:"branch,omitempty"`
 	AgentVersion string      `json:"agentVersion,omitempty"`
 	Summary      string      `json:"summary,omitempty"`
 	Error        string      `json:"error,omitempty"`
