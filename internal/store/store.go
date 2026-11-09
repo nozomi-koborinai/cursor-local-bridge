@@ -35,7 +35,7 @@ type Run struct {
 	Backend   backend.Kind
 	Model     string
 	SessionID string
-	// Summary is the agent's reply text from its most recent turn.
+	// Summary is the agent's final reply message from its most recent turn.
 	Summary   string
 	Lifecycle lifecycle.Run
 	CreatedAt time.Time

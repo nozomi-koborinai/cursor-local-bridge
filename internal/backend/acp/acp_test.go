@@ -147,8 +147,8 @@ func TestPromptStreamsReply(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 
-	if got := sink.text(); got != "echo: hello there" {
-		t.Errorf("text = %q, want %q", got, "echo: hello there")
+	if got := sink.text(); got != "reading fileecho: hello there" {
+		t.Errorf("text = %q, want %q", got, "reading fileecho: hello there")
 	}
 	events := sink.snapshot()
 	counts := map[string]int{}
@@ -400,8 +400,8 @@ func TestResumeDropsReplayedHistory(t *testing.T) {
 	if err := second.Prompt(context.Background(), "second"); err != nil {
 		t.Fatalf("Prompt after resume: %v", err)
 	}
-	if got := sink.text(); got != "echo: second" {
-		t.Errorf("text = %q, want %q", got, "echo: second")
+	if got := sink.text(); got != "reading fileecho: second" {
+		t.Errorf("text = %q, want %q", got, "reading fileecho: second")
 	}
 }
 

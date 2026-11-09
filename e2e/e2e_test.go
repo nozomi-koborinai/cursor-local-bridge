@@ -134,9 +134,29 @@ func TestCLB(t *testing.T) {
 		if done.SessionID != hello.SessionID {
 			t.Errorf("session = %q, want the first turn's %q", done.SessionID, hello.SessionID)
 		}
-		checkSigned(t, hooks.wait(t, hello.ID, "finished", 2)[1])
+		d := hooks.wait(t, hello.ID, "finished", 2)[1]
+		checkSigned(t, d)
+		if d.payload.Summary != "echo: tell me more" {
+			t.Errorf("webhook summary = %q, want %q", d.payload.Summary, "echo: tell me more")
+		}
 		if started := len(invocations(t, state)) - len(before); started != 1 {
 			t.Errorf("agent processes started for the follow-up = %d, want 1", started)
+		}
+		var transcript strings.Builder
+		for _, e := range c.logs(t, hello.ID) {
+			if e.Type != "agent_message_chunk" {
+				continue
+			}
+			var chunk struct {
+				Content struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			decode(t, e.Data, &chunk)
+			transcript.WriteString(chunk.Content.Text)
+		}
+		if got, want := transcript.String(), "reading fileecho: helloreading fileecho: tell me more"; got != want {
+			t.Errorf("full transcript from logs = %q, want %q", got, want)
 		}
 	})
 

@@ -45,7 +45,7 @@ func TestLaunchRunsToFinishedAndNotifies(t *testing.T) {
 	}
 
 	done := h.waitStatus(run.ID, "finished")
-	if done.Summary != "echo: \nhello" || done.QueuedPrompts != 0 || done.SessionID != "session-1" {
+	if done.Summary != "hello" || done.QueuedPrompts != 0 || done.SessionID != "session-1" {
 		t.Errorf("finished run = %+v", done)
 	}
 	if opts := h.agent.session(0).startOptions(); opts.Dir != run.Worktree || opts.ResumeSessionID != "" {
@@ -58,7 +58,7 @@ func TestLaunchRunsToFinishedAndNotifies(t *testing.T) {
 	hook := h.hooks.next(t)
 	want := webhook.Payload{
 		Event: webhook.EventStatusChange, RunID: run.ID, Status: "finished",
-		Repo: h.repo, Branch: run.Branch, Summary: "echo: \nhello",
+		Repo: h.repo, Branch: run.Branch, Summary: "hello",
 	}
 	hook.Timestamp = time.Time{}
 	if hook != want {
@@ -140,7 +140,7 @@ func TestPrintThinkingIsNotStored(t *testing.T) {
 				cfg.StoreAllEvents = tc.storeAll
 			})
 			run := h.launch("hello")
-			if done := h.waitStatus(run.ID, "finished"); done.Summary != "echo: \nhello" {
+			if done := h.waitStatus(run.ID, "finished"); done.Summary != "hello" {
 				t.Errorf("summary = %q, want the reply", done.Summary)
 			}
 			events := h.waitLog(run.ID, hasType("webhook"))
@@ -151,9 +151,19 @@ func TestPrintThinkingIsNotStored(t *testing.T) {
 	}
 }
 
-func TestSummaryJoinsMessageBlocks(t *testing.T) {
+func TestSummaryKeepsFinalAssistantMessage(t *testing.T) {
 	tool := func(typ string) backend.Event {
 		return backend.Event{Type: typ, Data: json.RawMessage(`{"sessionUpdate":"` + typ + `"}`)}
+	}
+	assistant := func(text string) backend.Event {
+		data, _ := json.Marshal(map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": []any{map[string]any{"type": "text", "text": text}},
+			},
+		})
+		return backend.Event{Type: "assistant", Data: data, Text: text}
 	}
 	for _, tc := range []struct {
 		name   string
@@ -161,22 +171,27 @@ func TestSummaryJoinsMessageBlocks(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "tool call between text",
-			events: []backend.Event{chunk("alpha"), tool("tool_call"), chunk("omega")},
-			want:   "alpha\nomega",
+			name:   "multi-chunk final message",
+			events: []backend.Event{chunk("final "), chunk("report")},
+			want:   "final report",
 		},
 		{
-			name:   "tool call update between text",
+			name:   "tool call between text keeps only final message",
+			events: []backend.Event{chunk("alpha"), tool("tool_call"), chunk("omega "), chunk("done")},
+			want:   "omega done",
+		},
+		{
+			name:   "tool call update between text keeps only final message",
 			events: []backend.Event{chunk("alpha"), tool("tool_call_update"), chunk("omega")},
-			want:   "alpha\nomega",
+			want:   "omega",
 		},
 		{
-			name:   "tool calls between text stay one break",
-			events: []backend.Event{chunk("alpha"), tool("tool_call"), tool("tool_call_update"), chunk("omega")},
-			want:   "alpha\nomega",
+			name:   "multiple tool calls between text keeps only final message",
+			events: []backend.Event{chunk("first"), tool("tool_call"), chunk("second"), tool("tool_call_update"), chunk("third")},
+			want:   "third",
 		},
 		{
-			name: "thought between text",
+			name: "thought between text stays in current message",
 			events: []backend.Event{
 				chunk("alpha"),
 				{Type: "agent_thought_chunk", Data: json.RawMessage(`{"sessionUpdate":"agent_thought_chunk"}`), Text: "mid"},
@@ -185,7 +200,7 @@ func TestSummaryJoinsMessageBlocks(t *testing.T) {
 			want: "alphamidomega",
 		},
 		{
-			name:   "command update between text",
+			name:   "command update between text stays in current message",
 			events: []backend.Event{chunk("alpha"), tool("available_commands_update"), chunk("omega")},
 			want:   "alphaomega",
 		},
@@ -195,9 +210,24 @@ func TestSummaryJoinsMessageBlocks(t *testing.T) {
 			want:   "alpha",
 		},
 		{
-			name:   "tool call after text",
+			name:   "turn ends after tool call falls back to last message",
 			events: []backend.Event{chunk("alpha"), tool("tool_call_update")},
 			want:   "alpha",
+		},
+		{
+			name:   "turn ends after multiple tool calls falls back to last message",
+			events: []backend.Event{chunk("first"), tool("tool_call"), chunk("second"), tool("tool_call"), tool("tool_call_update")},
+			want:   "second",
+		},
+		{
+			name:   "print mode multiple assistant messages keeps only final message",
+			events: []backend.Event{assistant("narration"), assistant("final summary")},
+			want:   "final summary",
+		},
+		{
+			name:   "print mode empty assistant message falls back to last non-empty message",
+			events: []backend.Event{assistant("final summary"), assistant("")},
+			want:   "final summary",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -216,8 +246,74 @@ func TestSummaryJoinsMessageBlocks(t *testing.T) {
 	}
 }
 
+func TestMultiTurnSummaryAndFullTranscriptLogs(t *testing.T) {
+	tool := backend.Event{Type: "tool_call", Data: json.RawMessage(`{"sessionUpdate":"tool_call","title":"Read file"}`)}
+	h := newHarness(t, &fakeAgent{onPrompt: func(_ context.Context, s *fakeSession, prompt string) error {
+		switch prompt {
+		case "turn-1":
+			s.sink.Event(chunk("turn 1 chatter"))
+			s.sink.Event(tool)
+			s.sink.Event(chunk("turn 1 summary"))
+		case "turn-2":
+			s.sink.Event(chunk("turn 2 chatter"))
+			s.sink.Event(tool)
+			s.sink.Event(chunk("turn 2 "))
+			s.sink.Event(chunk("final report"))
+		}
+		return nil
+	}})
+
+	run := h.launch("turn-1")
+	first := h.waitStatus(run.ID, "finished")
+	if first.Summary != "turn 1 summary" {
+		t.Fatalf("first turn summary = %q, want %q", first.Summary, "turn 1 summary")
+	}
+	if hook := h.hooks.next(t); hook.Summary != "turn 1 summary" {
+		t.Fatalf("first webhook summary = %q, want %q", hook.Summary, "turn 1 summary")
+	}
+
+	h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "turn-2"})
+	second := h.waitStatus(run.ID, "finished")
+	if second.Summary != "turn 2 final report" {
+		t.Fatalf("second turn summary = %q, want %q", second.Summary, "turn 2 final report")
+	}
+	if hook := h.hooks.next(t); hook.Summary != "turn 2 final report" {
+		t.Fatalf("second webhook summary = %q, want %q", hook.Summary, "turn 2 final report")
+	}
+
+	events := h.waitLog(run.ID, func(ev []ipc.Event) bool {
+		var hooks int
+		for _, e := range ev {
+			if e.Type == "webhook" {
+				hooks++
+			}
+		}
+		return hooks == 2
+	})
+	var chunks []string
+	for _, e := range events {
+		if e.Type != "agent_message_chunk" {
+			continue
+		}
+		var d struct {
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			t.Fatal(err)
+		}
+		chunks = append(chunks, d.Content.Text)
+	}
+	wantChunks := []string{"turn 1 chatter", "turn 1 summary", "turn 2 chatter", "turn 2 ", "final report"}
+	if !slices.Equal(chunks, wantChunks) {
+		t.Errorf("logged chunks = %q, want %q", chunks, wantChunks)
+	}
+	h.waitNDJSONMatchesLogs(run.ID)
+}
+
 func TestThoughtAndCommandUpdatesAreNotStored(t *testing.T) {
-	const summary = "thinking echo: \nhello"
+	const summary = "hello"
 	prompt := func(_ context.Context, s *fakeSession, text string) error {
 		s.sink.Event(backend.Event{
 			Type: "agent_thought_chunk",
@@ -281,7 +377,7 @@ func TestFollowUpWhileRunningIsSentAfterTheTurn(t *testing.T) {
 	close(release)
 
 	done := h.waitStatus(run.ID, "finished")
-	if done.Summary != "echo: \nsecond" {
+	if done.Summary != "second" {
 		t.Errorf("summary = %q, want the reply to the follow-up", done.Summary)
 	}
 	if n := h.agent.count(); n != 1 {
@@ -290,7 +386,7 @@ func TestFollowUpWhileRunningIsSentAfterTheTurn(t *testing.T) {
 	if got := h.agent.session(0).sentPrompts(); !slices.Equal(got, []string{"first", "second"}) {
 		t.Errorf("prompts = %v", got)
 	}
-	if hook := h.hooks.next(t); hook.Status != "finished" || hook.Summary != "echo: \nsecond" {
+	if hook := h.hooks.next(t); hook.Status != "finished" || hook.Summary != "second" {
 		t.Errorf("webhook = %+v, want one finished webhook after the follow-up", hook)
 	}
 }
@@ -308,13 +404,13 @@ func TestFollowUpAfterFinishResumesTheSession(t *testing.T) {
 		t.Errorf("status after follow-up = %s, want queued", resumed.Status)
 	}
 	done := h.waitStatus(run.ID, "finished")
-	if done.Summary != "echo: \nagain" {
+	if done.Summary != "again" {
 		t.Errorf("summary = %q", done.Summary)
 	}
 	if got := h.agent.session(1).startOptions().ResumeSessionID; got != first.SessionID || got == "" {
 		t.Errorf("resumed session ID = %q, want %q", got, first.SessionID)
 	}
-	if hook := h.hooks.next(t); hook.Status != "finished" || hook.Summary != "echo: \nagain" {
+	if hook := h.hooks.next(t); hook.Status != "finished" || hook.Summary != "again" {
 		t.Errorf("second webhook = %+v", hook)
 	}
 }
@@ -646,7 +742,7 @@ func TestLateReportsFromAClosedSessionAreDropped(t *testing.T) {
 	close(release)
 
 	done := h.waitStatus(run.ID, "finished")
-	if done.Summary != "echo: \nagain" {
+	if done.Summary != "again" {
 		t.Errorf("summary = %q, want only the new turn's text", done.Summary)
 	}
 	for _, e := range h.logs(run.ID) {
@@ -789,7 +885,7 @@ func TestPrintBackendNeedsTrustWorktree(t *testing.T) {
 		}
 
 		run := h.launch("hello")
-		if done := h.waitStatus(run.ID, "finished"); done.Summary != "echo: \nhello" || done.Backend != string(backend.ACP) {
+		if done := h.waitStatus(run.ID, "finished"); done.Summary != "hello" || done.Backend != string(backend.ACP) {
 			t.Errorf("acp launch = %+v", done)
 		}
 	})
@@ -840,14 +936,14 @@ func TestPrintBackendNeedsTrustWorktree(t *testing.T) {
 			t.Fatalf("backend = %s, want print", run.Backend)
 		}
 		done := h.waitStatus(run.ID, "finished")
-		if done.Summary != "echo: \nhi" {
-			t.Errorf("summary = %q, want %q", done.Summary, "echo: \nhi")
+		if done.Summary != "hi" {
+			t.Errorf("summary = %q, want %q", done.Summary, "hi")
 		}
 		if resumed := h.must(ipc.Request{Method: ipc.MethodFollowUp, RunID: run.ID, Prompt: "again"}); resumed.Status != "queued" {
 			t.Errorf("followup status = %s, want queued", resumed.Status)
 		}
 		done = h.waitStatus(run.ID, "finished")
-		if done.Summary != "echo: \nagain" || done.SessionID == "" {
+		if done.Summary != "again" || done.SessionID == "" {
 			t.Errorf("after followup = %+v", done)
 		}
 	})

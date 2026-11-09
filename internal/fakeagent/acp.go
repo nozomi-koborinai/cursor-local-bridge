@@ -178,6 +178,9 @@ func (a *fakeACP) echo(ctx context.Context, sid acp.SessionId, prompt string) (s
 		return "", err
 	}
 	const toolCallID = "read-1"
+	if err := a.update(ctx, sid, acp.UpdateAgentMessageText("reading file")); err != nil {
+		return "", err
+	}
 	err := a.update(ctx, sid, acp.StartToolCall(toolCallID, "Read fake file",
 		acp.WithStartKind(acp.ToolKindRead),
 		acp.WithStartStatus(acp.ToolCallStatusCompleted),
