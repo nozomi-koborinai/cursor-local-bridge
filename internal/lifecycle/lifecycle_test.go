@@ -158,6 +158,13 @@ func TestApply(t *testing.T) {
 			effects: []Effect{StartBackend{Resume: true}},
 		},
 		{
+			name:    "follow-up on a cleaned finished run is rejected",
+			from:    Run{State: Finished, Stopped: true},
+			event:   FollowUp{Prompt: "p2"},
+			want:    Run{State: Finished, Stopped: true},
+			wantErr: true,
+		},
+		{
 			name:    "follow-up on a stopped failed run is rejected",
 			from:    Run{State: Failed, Error: "boom", Stopped: true},
 			event:   FollowUp{Prompt: "p2"},

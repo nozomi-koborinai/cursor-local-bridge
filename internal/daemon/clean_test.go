@@ -123,6 +123,18 @@ func TestCleanDryRunThenRemovesFinishedWorktreesAndBranches(t *testing.T) {
 	if got := h.must(ipc.Request{Method: ipc.MethodStatus, RunID: plainRun.ID}); got.Status != "finished" || got.Worktree != "" {
 		t.Fatalf("plain run = %+v", got)
 	}
+	for _, id := range []string{finished.ID, failed.ID, stopped.ID} {
+		_, err := h.call(ipc.Request{Method: ipc.MethodFollowUp, RunID: id, Prompt: "more"})
+		if code := codeOf(err); code != ipc.CodeConflict {
+			t.Fatalf("follow-up on cleaned run %s: %v, want %s", id, err, ipc.CodeConflict)
+		}
+	}
+	assertGone(t, finished.Worktree, failed.Worktree)
+	for _, branch := range []string{finished.Branch, failed.Branch, stopped.Branch} {
+		if strings.Contains(clbBranches(t, h.repo), branch) {
+			t.Fatalf("rejected follow-up recreated %s", branch)
+		}
+	}
 
 	second := h.clean(false)
 	if second.DryRun || second.Runs == nil || len(second.Runs) != 0 {

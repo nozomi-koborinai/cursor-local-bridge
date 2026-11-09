@@ -432,6 +432,12 @@ func (d *Daemon) cleanOne(ctx context.Context, id store.RunID, dryRun bool) (ipc
 			return err
 		}
 		if !wtExists && !brExists {
+			if !dryRun && !run.Lifecycle.Stopped {
+				run.Lifecycle.Stopped = true
+				run.UpdatedAt = time.Now().UTC()
+				_, err := d.store.UpdateRun(d.writes, run)
+				return err
+			}
 			return nil
 		}
 		item = ipc.CleanedRun{
@@ -458,6 +464,13 @@ func (d *Daemon) cleanOne(ctx context.Context, id store.RunID, dryRun bool) (ipc
 		if brExists {
 			if err := worktree.DeleteBranch(cleanCtx, run.Repo, run.Branch); err != nil {
 				return fmt.Errorf("delete branch: %w", err)
+			}
+		}
+		if !run.Lifecycle.Stopped {
+			run.Lifecycle.Stopped = true
+			run.UpdatedAt = time.Now().UTC()
+			if _, err := d.store.UpdateRun(d.writes, run); err != nil {
+				return err
 			}
 		}
 		ok = true
