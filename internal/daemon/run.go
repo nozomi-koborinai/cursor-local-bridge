@@ -24,6 +24,8 @@ const (
 	eventPermissionAnswered  = "permission_answered"
 	eventPermissionCancelled = "permission_cancelled"
 	eventWebhook             = "webhook"
+	eventAgentProcess        = "agent_process"
+	eventStderr              = "stderr"
 )
 
 // Thought chunks, including print-mode "thinking", and available-command
@@ -105,6 +107,19 @@ type permReminder struct {
 	timer *time.Timer
 	n     int
 	perm  lifecycle.Permission
+}
+
+type agentProcessData struct {
+	PID          int             `json:"pid"`
+	Command      backend.Command `json:"command"`
+	Version      string          `json:"version,omitempty"`
+	VersionError string          `json:"versionError,omitempty"`
+}
+
+type stderrData struct {
+	PID    int    `json:"pid"`
+	Line   string `json:"line,omitempty"`
+	Capped bool   `json:"capped,omitempty"`
 }
 
 // actor owns one run. Its goroutine runs every function sent to inbox and is
@@ -266,23 +281,51 @@ func (a *actor) applyTo(run store.Run, e lifecycle.Event, edit func(*store.Run))
 		a.carried = append(a.carried, events...)
 		return run, a.perform(run, effects)
 	}
-	run.UpdatedAt = at
 	events = append(a.carried, events...)
 	a.carried = nil
-	appended, err := a.d.store.UpdateRun(a.d.writes, run, events...)
+	run, err = a.save(run, at, events...)
 	if err != nil {
 		return run, err
 	}
 	a.d.setRunActive(a.id, next.State.Active())
-	for _, ev := range appended {
-		a.appendNDJSON(ev)
-	}
 	if changed {
 		a.d.log.Info("run status", "run", a.id, "status", next.State, "error", next.Error)
 	}
 	err = a.perform(run, effects)
 	a.syncStall(changed || len(effects) > 0)
 	return run, err
+}
+
+func (a *actor) save(run store.Run, at time.Time, events ...store.NewEvent) (store.Run, error) {
+	run.UpdatedAt = at
+	appended, err := a.d.store.UpdateRun(a.d.writes, run, events...)
+	if err != nil {
+		return run, err
+	}
+	for _, ev := range appended {
+		a.appendNDJSON(ev)
+	}
+	return run, nil
+}
+
+func (a *actor) agentProcess(p backend.AgentProcess) {
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		a.d.log.Error("load run", "run", a.id, "err", err)
+		return
+	}
+	run.AgentVersion = p.Version
+	at := time.Now().UTC()
+	ev, err := newEvent(at, eventAgentProcess, agentProcessData{
+		PID: p.PID, Command: p.Command, Version: p.Version, VersionError: p.VersionErr,
+	})
+	if err != nil {
+		a.d.log.Error("encode event", "run", a.id, "type", eventAgentProcess, "err", err)
+		return
+	}
+	if _, err := a.save(run, at, ev); err != nil {
+		a.d.log.Error("append event", "run", a.id, "type", eventAgentProcess, "err", err)
+	}
 }
 
 func (a *actor) hydrateRetries(r *lifecycle.Run) {
@@ -780,14 +823,15 @@ func (a *actor) notify(run store.Run, state lifecycle.State) {
 		return
 	}
 	p := webhook.Payload{
-		Event:     webhook.EventStatusChange,
-		Timestamp: time.Now().UTC(),
-		RunID:     string(run.ID),
-		Status:    string(state),
-		Repo:      run.Repo,
-		Branch:    run.Branch,
-		Summary:   run.Summary,
-		Error:     run.Lifecycle.Error,
+		Event:        webhook.EventStatusChange,
+		Timestamp:    time.Now().UTC(),
+		RunID:        string(run.ID),
+		Status:       string(state),
+		Repo:         run.Repo,
+		Branch:       run.Branch,
+		AgentVersion: run.AgentVersion,
+		Summary:      run.Summary,
+		Error:        run.Lifecycle.Error,
 	}
 	a.d.wg.Go(func() {
 		sender, err := a.d.webhook()
@@ -959,9 +1003,15 @@ func (s sink) SetModel(model string) {
 	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
 }
 
-func (s sink) AgentProcess(backend.AgentProcess) {}
+func (s sink) AgentProcess(p backend.AgentProcess) {
+	s.a.postFrom(s.g, func() { s.a.agentProcess(p) })
+}
 
-func (s sink) Stderr(backend.Stderr) {}
+func (s sink) Stderr(l backend.Stderr) {
+	s.a.postFrom(s.g, func() {
+		s.a.appendEvent(eventStderr, stderrData{PID: l.PID, Line: l.Line, Capped: l.Capped})
+	})
+}
 
 var (
 	errSessionClosed       = errors.New("the agent session was closed")

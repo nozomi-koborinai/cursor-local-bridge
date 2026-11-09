@@ -1304,6 +1304,16 @@ func (s *fakeSession) Close() error {
 	return nil
 }
 
+func (s *fakeSession) reportProcess(version string) {
+	s.sink.AgentProcess(backend.AgentProcess{
+		PID: 4242 + s.n, Command: backend.CommandACP, Version: version,
+	})
+}
+
+func (s *fakeSession) reportStderr(line string) {
+	s.sink.Stderr(backend.Stderr{PID: 4242 + s.n, Line: line})
+}
+
 func (s *fakeSession) startOptions() backend.StartOptions {
 	s.mu.Lock()
 	defer s.mu.Unlock()
