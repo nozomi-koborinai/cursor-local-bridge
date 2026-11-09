@@ -304,7 +304,6 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	return a.call(ctx, func() error { return a.create(run, effects) })
 }
 
-<<<<<<< HEAD
 func (d *Daemon) configuredModel(requested string) string {
 	if m := cleanModel(requested); m != "" {
 		return m
@@ -325,11 +324,6 @@ func cleanModel(s string) string {
 	return s
 }
 
-// launchCheckout resolves where a run executes. A worktree run uses the git
-// root and a base commit. A run without a worktree uses the directory itself
-// and leaves the ref empty.
-=======
->>>>>>> 86aba5a (chore: drop comments that restate checkout cleanup)
 func launchCheckout(ctx context.Context, req ipc.Request) (repo, ref string, err error) {
 	if req.NoWorktree {
 		if req.Ref != "" {
@@ -432,12 +426,6 @@ func (d *Daemon) cleanOne(ctx context.Context, id store.RunID, dryRun bool) (ipc
 			return err
 		}
 		if !wtExists && !brExists {
-			if !dryRun && !run.Lifecycle.Stopped {
-				run.Lifecycle.Stopped = true
-				run.UpdatedAt = time.Now().UTC()
-				_, err := d.store.UpdateRun(d.writes, run)
-				return err
-			}
 			return nil
 		}
 		item = ipc.CleanedRun{
