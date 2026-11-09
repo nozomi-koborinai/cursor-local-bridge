@@ -232,21 +232,12 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Pass `
 
 </details>
 
-<<<<<<< HEAD
-- Empty fields (`summary`, `error`, `model`, `pendingPermission`, `pendingPermissions`) are omitted.
-=======
-- Empty fields (`summary`, `error`, `model`, `agentVersion`, `pendingPermission`) are omitted.
->>>>>>> abe1f97 (docs: describe agent version, stderr logs, and text status)
+- Empty fields (`summary`, `error`, `model`, `agentVersion`, `pendingPermission`, `pendingPermissions`) are omitted.
 - `model` is the model and effort requested for the run (from `clb launch --model`, `model` in `config.json`, the ACP session's parameterized config options, or `selectedModel` and `modelParameters` in `~/.cursor/cli-config.json`).
 - `agentVersion` is the Cursor CLI version of the run's most recent agent process. It is empty when that process's version probe failed, or when no process has started.
 - `summary` holds only the final assistant message from the run's most recent turn (or the last completed assistant message if the turn ended after a tool call with no further reply). Intermediate narration before tool calls and messages from earlier turns stay out of `summary`; run `clb logs <id>` to read the full multi-turn transcript.
-<<<<<<< HEAD
-- `error` says why the run failed, including up to the first 512 bytes of agent stderr.
-- `pendingPermission` is the oldest unanswered permission request, and `pendingPermissions` lists every unanswered request in FIFO order (also printed by `clb permissions <id>` or `clb approve --list <id>`). `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. By default `clb approve` selects `allow_once` and `clb deny` selects `reject_once` (or cancels if neither is offered). Pass `--permission <perm-id>` (or `--id <perm-id>`) to target a specific pending permission, `--all` to answer every pending permission, and `--option allow-once`, `--option allow-always` (or `--always`), `--option reject`, or an exact `optionId` from `options` to pick the decision.
-=======
 - `error` says why the run failed, including up to the first 512 bytes of agent stderr. A failed run always has `error`. `clb status -o text` prints it as its own block.
-- `pendingPermission` is the oldest unanswered permission request. `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. `clb approve` selects the option with `kind: "allow_once"` and `clb deny` selects `kind: "reject_once"` (or cancels if neither is offered).
->>>>>>> abe1f97 (docs: describe agent version, stderr logs, and text status)
+- `pendingPermission` is the oldest unanswered permission request, and `pendingPermissions` lists every unanswered request in FIFO order (also printed by `clb permissions <id>` or `clb approve --list <id>`). `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. By default `clb approve` selects `allow_once` and `clb deny` selects `reject_once` (or cancels if neither is offered). Pass `--permission <perm-id>` (or `--id <perm-id>`) to target a specific pending permission, `--all` to answer every pending permission, and `--option allow-once`, `--option allow-always` (or `--always`), `--option reject`, or an exact `optionId` from `options` to pick the decision.
 
 ### Events
 
