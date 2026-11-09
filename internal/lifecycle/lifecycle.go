@@ -72,6 +72,9 @@ type Run struct {
 	// non-empty exactly when State is AwaitingPermission.
 	Permissions []Permission
 	Error       string
+	// Stopped reports that Stop has been run on a failed run, so FollowUp
+	// cannot resume it even though State stays Failed.
+	Stopped bool
 }
 
 type Event interface{ event() }
@@ -95,7 +98,7 @@ type PermissionCancelled struct {
 	Reason CancelReason
 }
 
-// FollowUp queues a prompt, or resumes a finished run with it.
+// FollowUp queues a prompt, or resumes a finished or failed run with it.
 type FollowUp struct{ Prompt string }
 
 // Stop ends the run and releases its worktree. The run is stopping until the
@@ -251,6 +254,11 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 			return r, nil, nil
 		case Finished:
 			return Run{State: Queued, Prompts: []string{e.Prompt}}, []Effect{StartBackend{Resume: true}}, nil
+		case Failed:
+			if r.Stopped {
+				return r, nil, notAllowed("follow up on", Stopped)
+			}
+			return Run{State: Queued, Prompts: []string{e.Prompt}}, []Effect{StartBackend{Resume: true}}, nil
 		default:
 			return r, nil, notAllowed("follow up on", r.State)
 		}
@@ -262,6 +270,9 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 			return Run{State: Stopping}, append(cancels, CloseBackend{}, RemoveWorktree{}), nil
 		case Finished:
 			return Run{State: Stopping}, []Effect{RemoveWorktree{}}, nil
+		case Failed:
+			r.Stopped = true
+			return r, []Effect{RemoveWorktree{}}, nil
 		default:
 			return r, []Effect{RemoveWorktree{}}, nil
 		}
@@ -274,6 +285,10 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		return Run{State: Failed, Error: e.Err}, append(cancels, CloseBackend{}, Notify{State: Failed}), nil
 
 	case WorktreeRemoved:
+		if r.State == Failed {
+			r.Stopped = true
+			return r, nil, nil
+		}
 		if r.State != Stopping {
 			return r, nil, nil
 		}
@@ -283,7 +298,7 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		if r.State != Stopping {
 			return r, nil, nil
 		}
-		return Run{State: Failed, Error: e.Err}, []Effect{Notify{State: Failed}}, nil
+		return Run{State: Failed, Error: e.Err, Stopped: true}, []Effect{Notify{State: Failed}}, nil
 	}
 	panic(fmt.Sprintf("lifecycle: unhandled event %T", e))
 }

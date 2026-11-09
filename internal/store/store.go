@@ -57,7 +57,7 @@ type Store struct {
 	db *sql.DB
 }
 
-const runColumns = `id, repo, base_ref, branch, worktree, backend, model, session_id, state, prompts, permissions, error, summary, created_at, updated_at`
+const runColumns = `id, repo, base_ref, branch, worktree, backend, model, session_id, state, prompts, permissions, error, stopped, summary, created_at, updated_at`
 
 // Open opens or creates the database at path and applies pending migrations.
 func Open(path string) (*Store, error) {
@@ -93,9 +93,9 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO runs (`+runColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.SessionID,
-		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Summary,
+		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Lifecycle.Stopped, r.Summary,
 		row.created, row.updated,
 	)
 	if err != nil {
@@ -158,10 +158,10 @@ func (s *Store) UpdateRun(ctx context.Context, r Run, events ...NewEvent) ([]Eve
 	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET
 			repo = ?, base_ref = ?, branch = ?, worktree = ?, backend = ?, model = ?, session_id = ?,
-			state = ?, prompts = ?, permissions = ?, error = ?, summary = ?, updated_at = ?
+			state = ?, prompts = ?, permissions = ?, error = ?, stopped = ?, summary = ?, updated_at = ?
 		WHERE id = ?`,
 		r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.SessionID,
-		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Summary,
+		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Lifecycle.Stopped, r.Summary,
 		row.updated, r.ID,
 	)
 	if err != nil {
@@ -385,7 +385,7 @@ func scanRun(sc rowScanner) (Run, error) {
 	err := sc.Scan(
 		&r.ID, &r.Repo, &r.BaseRef, &r.Branch, &r.Worktree,
 		&backendText, &r.Model, &r.SessionID, &stateText,
-		&prompts, &permissions, &r.Lifecycle.Error, &r.Summary,
+		&prompts, &permissions, &r.Lifecycle.Error, &r.Lifecycle.Stopped, &r.Summary,
 		&created, &updated,
 	)
 	if err != nil {

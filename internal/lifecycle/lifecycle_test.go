@@ -150,10 +150,17 @@ func TestApply(t *testing.T) {
 			effects: []Effect{StartBackend{Resume: true}},
 		},
 		{
-			name:    "follow-up on a failed run is rejected",
+			name:    "follow-up on a failed run resumes the session",
 			from:    Run{State: Failed, Error: "boom"},
 			event:   FollowUp{Prompt: "p2"},
-			want:    Run{State: Failed, Error: "boom"},
+			want:    Run{State: Queued, Prompts: []string{"p2"}},
+			effects: []Effect{StartBackend{Resume: true}},
+		},
+		{
+			name:    "follow-up on a stopped failed run is rejected",
+			from:    Run{State: Failed, Error: "boom", Stopped: true},
+			event:   FollowUp{Prompt: "p2"},
+			want:    Run{State: Failed, Error: "boom", Stopped: true},
 			wantErr: true,
 		},
 		{
@@ -209,20 +216,20 @@ func TestApply(t *testing.T) {
 			name:    "failed removal while stopping fails the run and notifies",
 			from:    Run{State: Stopping},
 			event:   WorktreeRemoveFailed{Err: "remove worktree: locked"},
-			want:    Run{State: Failed, Error: "remove worktree: locked"},
+			want:    Run{State: Failed, Error: "remove worktree: locked", Stopped: true},
 			effects: []Effect{Notify{State: Failed}},
 		},
 		{
 			name:  "removal after a stop of a failed run keeps the failure",
 			from:  Run{State: Failed, Error: "boom"},
 			event: WorktreeRemoved{},
-			want:  Run{State: Failed, Error: "boom"},
+			want:  Run{State: Failed, Error: "boom", Stopped: true},
 		},
 		{
 			name:  "failed removal after a stop of a failed run keeps the failure",
-			from:  Run{State: Failed, Error: "boom"},
+			from:  Run{State: Failed, Error: "boom", Stopped: true},
 			event: WorktreeRemoveFailed{Err: "remove worktree: locked"},
-			want:  Run{State: Failed, Error: "boom"},
+			want:  Run{State: Failed, Error: "boom", Stopped: true},
 		},
 		{
 			name:  "removal after a stop of a stopped run changes nothing",
@@ -285,7 +292,7 @@ func TestApply(t *testing.T) {
 			name:    "stop on a failed run keeps the failure",
 			from:    Run{State: Failed, Error: "boom"},
 			event:   Stop{},
-			want:    Run{State: Failed, Error: "boom"},
+			want:    Run{State: Failed, Error: "boom", Stopped: true},
 			effects: []Effect{RemoveWorktree{}},
 		},
 		{

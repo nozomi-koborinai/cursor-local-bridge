@@ -127,6 +127,36 @@ type Config struct {
 	// a workspace the CLI has not trusted, and each run uses a new worktree.
 	// Default false rejects a print launch or followup instead.
 	TrustWorktree bool `json:"trustWorktree"`
+	// StallTimeout fails a queued or running run that receives no agent
+	// event within this duration. Waiting in awaiting_permission pauses the
+	// timer. Default 0 disables the watchdog.
+	StallTimeout Duration `json:"stallTimeout"`
+	// KeepAwake holds a power assertion on macOS (caffeinate) while at least
+	// one run is active. Default false.
+	KeepAwake bool `json:"keepAwake"`
+}
+
+// Duration is a time.Duration that unmarshals from a Go duration string such
+// as "10m" or "30s". Empty or "0" is zero.
+type Duration time.Duration
+
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return errors.New("stallTimeout must be a duration string such as \"10m\" or \"0\"")
+	}
+	if s == "" || s == "0" {
+		*d = 0
+		return nil
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil || parsed < 0 {
+		return fmt.Errorf("stallTimeout %q is not a non-negative duration such as \"10m\" or \"0\"", s)
+	}
+	*d = Duration(parsed)
+	return nil
 }
 
 // Webhook configures run notifications. Secret is the single canonical
