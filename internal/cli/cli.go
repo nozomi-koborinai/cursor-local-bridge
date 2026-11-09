@@ -74,7 +74,8 @@ func newRoot(version string) *cobra.Command {
 		a.launchCmd(),
 		a.runCmd("status", "Print a run", ipc.MethodStatus),
 		a.followUpCmd(),
-		a.runCmd("stop", "Stop a run and delete its worktree; its branch stays", ipc.MethodStop),
+		a.runCmd("stop", "Stop a run. A worktree run loses its worktree and keeps its branch. A run without a worktree keeps its directory", ipc.MethodStop),
+		a.cleanCmd(),
 		a.permissionAnswerCmd("approve", "Approve a run's pending permission(s)", ipc.MethodApprove),
 		a.permissionAnswerCmd("deny", "Deny a run's pending permission(s)", ipc.MethodDeny),
 		a.permissionsCmd(),
@@ -179,7 +180,7 @@ func (a *app) launchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "launch [flags] PROMPT",
 		Short: "Start a run on a new branch and worktree of a repository",
-		Long:  "Start a run on a new branch and worktree of a repository. A PROMPT of - reads the prompt from stdin.",
+		Long:  "Start a run on a new branch and worktree of a repository. Pass --no-worktree to run in --repo directly, with no worktree and no branch. A PROMPT of - reads the prompt from stdin.",
 		Args:  cobra.ExactArgs(1),
 	}
 	format := addOutputFlag(cmd)
@@ -193,10 +194,37 @@ func (a *app) launchCmd() *cobra.Command {
 		}
 		return a.printRun(cmd, req, *format)
 	}
-	cmd.Flags().StringVar(&repo, "repo", ".", "repository to work in")
+	cmd.Flags().StringVar(&repo, "repo", ".", "repository or directory to work in")
+	cmd.Flags().BoolVar(&req.NoWorktree, "no-worktree", false, "run directly in --repo without creating a git worktree or branch")
 	cmd.Flags().StringVar(&req.Ref, "ref", "", "commit, branch, or tag to start the run's branch from (default HEAD)")
 	cmd.Flags().StringVar(&req.Model, "model", "", "model for the agent (default from the config)")
 	cmd.Flags().StringVar(&req.Backend, "backend", "", "acp or print (default from the config)")
+	return cmd
+}
+
+func (a *app) cleanCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:     "clean",
+		Aliases: []string{"gc"},
+		Short:   "Remove worktrees and branches of finished, failed, and stopped runs",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var clean *ipc.CleanResult
+			err := a.call(cmd, ipc.Request{Method: ipc.MethodClean, DryRun: dryRun}, func(r ipc.Response) error {
+				clean = r.Clean
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			if clean == nil {
+				return errors.New("the daemon replied without a clean result")
+			}
+			return writeIndented(cmd.OutOrStdout(), clean)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report what would be removed without deleting anything")
 	return cmd
 }
 

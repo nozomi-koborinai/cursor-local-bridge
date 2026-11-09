@@ -376,6 +376,110 @@ func TestCLB(t *testing.T) {
 		}
 	})
 
+	var plain ipc.Run
+	step("launch --no-worktree leaves the directory in place", func(t *testing.T) {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		note := filepath.Join(dir, "note.txt")
+		if err := os.WriteFile(note, []byte("keep\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		plain = c.run(t, "launch", "--repo", dir, "--no-worktree", "hello")
+		if plain.Status != "queued" || plain.Repo != dir || plain.BaseRef != "" || plain.Branch != "" || plain.Worktree != "" {
+			t.Fatalf("launch printed %+v, want a queued run in %s with no checkout", plain, dir)
+		}
+		finished := c.waitStatus(t, plain.ID, "finished")
+		if finished.Summary != "echo: hello" || finished.Repo != dir {
+			t.Fatalf("finished = %+v", finished)
+		}
+		status := c.output(t, "", "status", plain.ID)
+		for _, key := range []string{`"baseRef"`, `"branch"`, `"worktree"`} {
+			if bytes.Contains(status, []byte(key)) {
+				t.Errorf("status included %s:\n%s", key, status)
+			}
+		}
+		delivered := hooks.wait(t, plain.ID, "finished", 1)[0]
+		checkSigned(t, delivered)
+		if bytes.Contains(delivered.body, []byte(`"branch"`)) || delivered.payload.Repo != dir {
+			t.Fatalf("webhook = %s", delivered.body)
+		}
+		if stopped := c.run(t, "stop", plain.ID); stopped.Status != "stopped" {
+			t.Errorf("stop printed status %s, want stopped", stopped.Status)
+		}
+		if body, err := os.ReadFile(note); err != nil || string(body) != "keep\n" {
+			t.Fatalf("note after stop = %q, %v", body, err)
+		}
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	var active ipc.Run
+	step("clean --dry-run reports leftover checkouts and deletes nothing", func(t *testing.T) {
+		active = c.run(t, "launch", "--repo", repo, "[slow] count")
+		c.waitStatus(t, active.ID, "running")
+		before := gitBranches(t, repo)
+		var report cleanReport
+		decode(t, c.output(t, "", "clean", "--dry-run"), &report)
+		if !report.DryRun {
+			t.Fatalf("dryRun = false: %+v", report)
+		}
+		found, ok := findCleaned(report.Runs, hello.ID)
+		if !ok || found.Status != "finished" || found.Branch != hello.Branch || found.Worktree != hello.Worktree || found.Repo != repo {
+			t.Fatalf("dry-run entry for %s = %+v, ok %v", hello.ID, found, ok)
+		}
+		if _, ok := findCleaned(report.Runs, plain.ID); ok {
+			t.Fatalf("dry-run included the directory run %s", plain.ID)
+		}
+		if _, ok := findCleaned(report.Runs, active.ID); ok {
+			t.Fatalf("dry-run included the running run %s", active.ID)
+		}
+		if _, err := os.Stat(hello.Worktree); err != nil {
+			t.Fatalf("worktree after dry-run: %v", err)
+		}
+		if got := gitBranches(t, repo); got != before {
+			t.Fatalf("branches after dry-run:\n%s\nwant:\n%s", got, before)
+		}
+	})
+
+	step("clean and gc remove finished worktrees and branches", func(t *testing.T) {
+		var report cleanReport
+		decode(t, c.output(t, "", "clean"), &report)
+		if report.DryRun {
+			t.Fatalf("clean ran as a dry-run: %+v", report)
+		}
+		if _, err := os.Stat(hello.Worktree); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("worktree after clean: %v, want it gone", err)
+		}
+		if gitBranchExists(t, repo, hello.Branch) {
+			t.Errorf("branch %s still exists", hello.Branch)
+		}
+		if still := c.waitStatus(t, active.ID, "running"); still.Worktree == "" {
+			t.Fatalf("running run lost its worktree: %+v", still)
+		}
+		if _, err := os.Stat(active.Worktree); err != nil {
+			t.Fatalf("running worktree after clean: %v", err)
+		}
+		if !gitBranchExists(t, repo, active.Branch) {
+			t.Errorf("clean deleted the running run's branch %s", active.Branch)
+		}
+		for _, line := range strings.Split(gitBranches(t, repo), "\n") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "*"))
+			if strings.HasPrefix(line, "clb/") && line != active.Branch {
+				t.Errorf("clean left %s", line)
+			}
+		}
+		decode(t, c.output(t, "", "gc"), &report)
+		if report.DryRun || len(report.Runs) != 0 {
+			t.Fatalf("gc = %+v, want no runs", report)
+		}
+		if stopped := c.run(t, "stop", active.ID); stopped.Status != "stopped" {
+			t.Errorf("stop printed status %s, want stopped", stopped.Status)
+		}
+	})
+
 	step("SIGTERM stops the daemon cleanly", func(t *testing.T) {
 		if err := daemon.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
@@ -700,6 +804,45 @@ func startDaemon(t *testing.T, c *clb, stateDir string) *process {
 		t.Fatalf("the daemon did not answer within %s", timeout)
 	}
 	return d
+}
+
+type cleanReport struct {
+	DryRun bool             `json:"dryRun"`
+	Runs   []ipc.CleanedRun `json:"runs"`
+}
+
+func findCleaned(runs []ipc.CleanedRun, id string) (ipc.CleanedRun, bool) {
+	for _, run := range runs {
+		if run.ID == id {
+			return run, true
+		}
+	}
+	return ipc.CleanedRun{}, false
+}
+
+func gitBranches(t *testing.T, repo string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "branch", "--list")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func gitBranchExists(t *testing.T, repo, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	err := cmd.Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	t.Fatalf("git show-ref %s: %v", branch, err)
+	return false
 }
 
 type payload struct {
