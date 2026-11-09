@@ -32,8 +32,7 @@ type Run struct {
 	BaseRef string
 	Branch  string
 	// Worktree is the git worktree clb created for this run. It is empty when
-	// the run was launched in Repo directly. Cleanup must not delete Repo, or
-	// end processes there, in that case.
+	// the run was launched in Repo directly.
 	Worktree  string
 	Backend   backend.Kind
 	Model     string

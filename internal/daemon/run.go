@@ -453,10 +453,8 @@ func (a *actor) perform(run store.Run, effects []lifecycle.Effect) error {
 const removeTimeout = time.Minute
 
 // removeWorktree removes the run's worktree and applies the outcome in the
-// same job, so that no other command acts on the run in between. A run
-// without a worktree reports the removal immediately. EndUnder and Remove
-// would treat the user's directory as a worktree. It returns the removal's
-// error, if any, for the caller of the command.
+// same job, so that no other command acts on the run in between. It returns
+// the removal's error, if any, for the caller of the command.
 func (a *actor) removeWorktree(run store.Run) error {
 	a.awaitClosed()
 	var err error
@@ -479,8 +477,7 @@ func (a *actor) removeWorktree(run store.Run) error {
 
 // startBackend prepares the run's directory on the run's goroutine, so a
 // stop can never interleave with it, then starts the session in the
-// background. A run with a worktree gets one created. A run without one
-// must still have its directory.
+// background.
 func (a *actor) startBackend(run store.Run, resume bool) {
 	a.awaitClosed()
 	if run.HasWorktree() {
@@ -541,7 +538,6 @@ func requireDir(dir string) error {
 func (a *actor) sweep(g *generation, dir string) {
 	a.sweepMu.Lock()
 	defer a.sweepMu.Unlock()
-	// An empty dir is not a worktree. EndUnder must not run against it.
 	if dir == "" || a.sweeper != g {
 		return
 	}

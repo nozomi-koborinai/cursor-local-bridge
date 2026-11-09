@@ -54,8 +54,6 @@ func TestCleanDryRunThenRemovesFinishedWorktreesAndBranches(t *testing.T) {
 	waiting := h.launch("permit")
 	waiting = h.waitStatus(waiting.ID, "awaiting_permission")
 
-	// Dry-run waits out the finished sessions' sweeps before the sleeps below
-	// are started, so a later EndUnder is clean's and not the finish sweep.
 	dry := h.clean(true)
 	want := []ipc.CleanedRun{
 		{ID: stopped.ID, Status: "stopped", Repo: h.repo, Branch: stopped.Branch},

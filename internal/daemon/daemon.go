@@ -304,6 +304,7 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	return a.call(ctx, func() error { return a.create(run, effects) })
 }
 
+<<<<<<< HEAD
 func (d *Daemon) configuredModel(requested string) string {
 	if m := cleanModel(requested); m != "" {
 		return m
@@ -327,6 +328,8 @@ func cleanModel(s string) string {
 // launchCheckout resolves where a run executes. A worktree run uses the git
 // root and a base commit. A run without a worktree uses the directory itself
 // and leaves the ref empty.
+=======
+>>>>>>> 86aba5a (chore: drop comments that restate checkout cleanup)
 func launchCheckout(ctx context.Context, req ipc.Request) (repo, ref string, err error) {
 	if req.NoWorktree {
 		if req.Ref != "" {
@@ -382,10 +385,6 @@ func (d *Daemon) list(ctx context.Context, send func(ipc.Response) error) error 
 	return send(ipc.Response{Runs: out})
 }
 
-// clean removes worktrees and clb/<id> branches of runs that are not active
-// and that still have one. It does not change a run's status. A second call
-// finds nothing left on disk or in git. Each run is cleaned on its actor, so
-// the removal cannot interleave with followup or stop.
 func (d *Daemon) clean(ctx context.Context, dryRun bool, send func(ipc.Response) error) error {
 	runs, err := d.store.ListRuns(ctx)
 	if err != nil {
@@ -450,9 +449,6 @@ func (d *Daemon) cleanOne(ctx context.Context, id store.RunID, dryRun bool) (ipc
 			ok = true
 			return nil
 		}
-		// End processes before deleting the directory. Discard also prunes a
-		// registration left when the directory is already gone. git branch -D
-		// refuses a branch that git still considers checked out.
 		if wtExists {
 			proc.EndUnder(run.Worktree)
 		}

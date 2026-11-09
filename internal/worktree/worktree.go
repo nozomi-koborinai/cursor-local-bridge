@@ -80,8 +80,7 @@ func ResolveCommit(ctx context.Context, repo, ref string) (string, error) {
 // branch and its commits stay. Changes that are not committed yet are
 // committed onto the worktree's branch first. Ignored files are left out of
 // that commit. If the commit fails, the worktree stays. Removing a worktree
-// that no longer exists succeeds. An empty path does nothing, so a run that
-// has no worktree cannot prune or delete the directory it was launched in.
+// that no longer exists succeeds. An empty path does nothing.
 func Remove(ctx context.Context, repo, path string) error {
 	if path == "" {
 		return nil
@@ -100,12 +99,9 @@ func Remove(ctx context.Context, repo, path string) error {
 	return err
 }
 
-// Discard removes the worktree at path without committing. Clean deletes the
-// branch as well, so a save commit would be thrown away, and a hook or a
-// missing identity would refuse the commit and leave the worktree in place.
-// An empty path does nothing. A path git no longer lists is deleted from
-// disk. A missing path succeeds. Discard then prunes git's worktree records,
-// including a record left behind when an earlier discard crashed.
+// Discard removes the worktree at path without committing. An empty path
+// does nothing. A path git no longer lists is deleted from disk. A missing
+// path succeeds. Discard then prunes git's worktree records.
 func Discard(ctx context.Context, repo, path string) error {
 	if path == "" {
 		return nil
