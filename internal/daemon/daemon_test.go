@@ -229,6 +229,23 @@ func TestSummaryKeepsFinalAssistantMessage(t *testing.T) {
 			events: []backend.Event{assistant("final summary"), assistant("")},
 			want:   "final summary",
 		},
+		{
+			name: "transport error between text keeps only final message",
+			events: []backend.Event{
+				chunk("alpha"),
+				{Type: backend.EventTransportError, Data: json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"RetriableError: http/2 stream closed"}}`)},
+				chunk("omega"),
+			},
+			want: "omega",
+		},
+		{
+			name: "turn ends after transport error falls back to last message",
+			events: []backend.Event{
+				chunk("alpha"),
+				{Type: backend.EventTransportError, Data: json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"RetriableError: http/2 stream closed"}}`)},
+			},
+			want: "alpha",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			events := tc.events

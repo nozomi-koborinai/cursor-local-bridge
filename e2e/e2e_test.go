@@ -170,8 +170,17 @@ func TestCLB(t *testing.T) {
 		} {
 			*tc.run = c.run(t, "launch", "--repo", repo, "[permission] "+tc.command)
 			waiting := c.waitStatus(t, tc.run.ID, "awaiting_permission")
-			if p := waiting.PendingPermission; p == nil || p.Title != "Run fake command" {
-				t.Errorf("pending permission = %+v, want title %q", p, "Run fake command")
+			if p := waiting.PendingPermission; p == nil || p.Title != "Run fake command" || p.ID != "perm-1" ||
+				p.ToolCallID != "perm-1" || p.Kind != "execute" || p.Command != "true" {
+				t.Errorf("pending permission = %+v, want the fake command", p)
+			}
+			asked := hooks.wait(t, tc.run.ID, "awaiting_permission", 1)[0]
+			checkSigned(t, asked)
+			if asked.header.Get("X-Clb-Event") != "permissionRequested" || asked.payload.Event != "permissionRequested" ||
+				asked.payload.Permission == nil || asked.payload.Permission.ID != "perm-1" ||
+				asked.payload.Permission.Kind != "execute" || asked.payload.Permission.Command != "true" ||
+				asked.payload.Reminder != 0 {
+				t.Errorf("permission webhook = %s", asked.body)
 			}
 			c.run(t, tc.command, tc.run.ID)
 			if done := c.waitStatus(t, tc.run.ID, "finished"); done.Summary != tc.summary {
@@ -276,6 +285,74 @@ func TestCLB(t *testing.T) {
 			t.Error("the daemon reported a data race")
 		}
 	})
+}
+
+func TestTransportErrorAndPermissionReminder(t *testing.T) {
+	bin := t.TempDir()
+	c := &clb{path: buildCLB(t, bin), home: shortTempDir(t)}
+	agentPath, err := fakeagenttest.Build(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := newReceiver(t)
+	writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
+		"agentPath": agentPath,
+		"webhook": map[string]any{
+			"url":      hooks.url,
+			"secret":   secret,
+			"reminder": "200ms",
+		},
+	})
+	startDaemon(t, c, t.TempDir())
+	repo := gitRepo(t)
+
+	launched := c.run(t, "launch", "--repo", repo, "[transport] hello")
+	done := c.waitStatus(t, launched.ID, "finished")
+	if done.Summary != "after" || strings.Contains(done.Summary, "RetriableError") {
+		t.Fatalf("summary = %q", done.Summary)
+	}
+	var sawTransport bool
+	for _, e := range c.logs(t, launched.ID) {
+		if e.Type == "transport_error" && strings.Contains(string(e.Data), "RetriableError: http/2 stream closed") {
+			sawTransport = true
+		}
+	}
+	if !sawTransport {
+		t.Fatal("logs have no transport_error event")
+	}
+
+	waitingRun := c.run(t, "launch", "--repo", repo, "[permission] remind")
+	waiting := c.waitStatus(t, waitingRun.ID, "awaiting_permission")
+	if waiting.PendingPermission == nil || waiting.PendingPermission.Command != "true" {
+		t.Fatalf("pending = %+v", waiting.PendingPermission)
+	}
+	var reminders []delivery
+	deadline := time.Now().Add(timeout)
+	for len(reminders) < 2 && time.Now().Before(deadline) {
+		for _, d := range hooks.matching(waitingRun.ID, "awaiting_permission") {
+			if d.payload.Event == "permissionReminder" && !slices.ContainsFunc(reminders, func(got delivery) bool {
+				return got.payload.Reminder == d.payload.Reminder
+			}) {
+				reminders = append(reminders, d)
+			}
+		}
+		if len(reminders) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(reminders) < 2 || reminders[0].payload.Reminder != 1 || reminders[1].payload.Reminder != 2 {
+		t.Fatalf("reminders = %+v", reminders)
+	}
+	checkSigned(t, reminders[0])
+	if reminders[0].header.Get("X-Clb-Event") != "permissionReminder" || reminders[0].payload.Permission == nil ||
+		reminders[0].payload.Permission.ID != "perm-1" {
+		t.Fatalf("reminder = %s", reminders[0].body)
+	}
+	c.run(t, "approve", waitingRun.ID)
+	if finished := c.waitStatus(t, waitingRun.ID, "finished"); finished.Summary != "permission: approved" {
+		t.Fatalf("summary = %q", finished.Summary)
+	}
 }
 
 type clb struct {
@@ -414,13 +491,24 @@ func startDaemon(t *testing.T, c *clb, stateDir string) *process {
 }
 
 type payload struct {
-	Event   string `json:"event"`
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Repo    string `json:"repo"`
-	Branch  string `json:"branch"`
-	Summary string `json:"summary"`
-	Error   string `json:"error"`
+	Event      string    `json:"event"`
+	ID         string    `json:"id"`
+	Status     string    `json:"status"`
+	Repo       string    `json:"repo"`
+	Branch     string    `json:"branch"`
+	Summary    string    `json:"summary"`
+	Error      string    `json:"error"`
+	Permission *permBody `json:"permission"`
+	Reminder   int       `json:"reminder"`
+}
+
+type permBody struct {
+	ID      string          `json:"id"`
+	Title   string          `json:"title"`
+	Kind    string          `json:"kind"`
+	Command string          `json:"command"`
+	URL     string          `json:"url"`
+	Options json.RawMessage `json:"options"`
 }
 
 type delivery struct {
