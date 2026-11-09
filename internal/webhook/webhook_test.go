@@ -295,6 +295,9 @@ func TestSendExtraHeaders(t *testing.T) {
 	if hdr.Get(SignatureHeader) == "forged" || !Verify(secret, got, hdr.Get(SignatureHeader)) {
 		t.Fatalf("signature = %q", hdr.Get(SignatureHeader))
 	}
+	if strings.Contains(string(got), `"branch"`) {
+		t.Fatalf("webhook body included an empty branch: %s", got)
+	}
 }
 
 func TestCheckHeaders(t *testing.T) {

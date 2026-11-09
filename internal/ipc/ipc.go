@@ -21,6 +21,7 @@ const (
 	MethodLogs     Method = "logs"
 	MethodApprove  Method = "approve"
 	MethodDeny     Method = "deny"
+	MethodClean    Method = "clean"
 )
 
 // Request is one call. Fields a method does not use stay empty.
@@ -33,7 +34,9 @@ type Request struct {
 	Model   string `json:"model,omitempty"`
 	Backend string `json:"backend,omitempty"`
 	// Follow keeps a logs call open until the run is no longer active.
-	Follow bool `json:"follow,omitempty"`
+	Follow     bool `json:"follow,omitempty"`
+	NoWorktree bool `json:"noWorktree,omitempty"`
+	DryRun     bool `json:"dryRun,omitempty"`
 	// PermissionID and PermissionIDs target specific pending permissions on
 	// approve or deny. When both are empty and All is false, the oldest pending
 	// permission is answered.
@@ -49,10 +52,29 @@ type Request struct {
 // Response is one reply line. Logs calls get one line per event. Every other
 // call gets exactly one line.
 type Response struct {
-	Run   *Run   `json:"run,omitempty"`
-	Runs  []Run  `json:"runs,omitempty"`
-	Event *Event `json:"event,omitempty"`
-	Error *Error `json:"error,omitempty"`
+	Run   *Run         `json:"run,omitempty"`
+	Runs  []Run        `json:"runs,omitempty"`
+	Event *Event       `json:"event,omitempty"`
+	Error *Error       `json:"error,omitempty"`
+	Clean *CleanResult `json:"clean,omitempty"`
+}
+
+// CleanResult is the body of a clean call. Runs is empty when nothing was
+// removed. It is never null.
+type CleanResult struct {
+	DryRun bool         `json:"dryRun"`
+	Runs   []CleanedRun `json:"runs"`
+}
+
+// CleanedRun is a finished, failed, or stopped run that clean removed, or
+// would remove when DryRun is set. Branch and Worktree are set only for the
+// side that still exists.
+type CleanedRun struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Repo     string `json:"repo"`
+	Branch   string `json:"branch,omitempty"`
+	Worktree string `json:"worktree,omitempty"`
 }
 
 const (
@@ -73,9 +95,9 @@ type Run struct {
 	ID                 string       `json:"id"`
 	Status             string       `json:"status"`
 	Repo               string       `json:"repo"`
-	BaseRef            string       `json:"baseRef"`
-	Branch             string       `json:"branch"`
-	Worktree           string       `json:"worktree"`
+	BaseRef            string       `json:"baseRef,omitempty"`
+	Branch             string       `json:"branch,omitempty"`
+	Worktree           string       `json:"worktree,omitempty"`
 	Backend            string       `json:"backend"`
 	Model              string       `json:"model,omitempty"`
 	SessionID          string       `json:"sessionId,omitempty"`

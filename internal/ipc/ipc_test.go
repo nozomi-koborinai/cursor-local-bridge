@@ -167,6 +167,73 @@ func TestClientHangupCancelsTheCall(t *testing.T) {
 	}
 }
 
+func TestCleanAndRunJSON(t *testing.T) {
+	req := Request{Method: MethodClean, NoWorktree: true, DryRun: true}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Request
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != req {
+		t.Fatalf("request = %+v, want %+v", decoded, req)
+	}
+
+	full := Run{
+		ID: "run-1", Status: "finished", Repo: "/path/to/repo",
+		BaseRef: "HEAD", Branch: "clb/run-1", Worktree: "/path/to/wt", Backend: "acp",
+	}
+	body, err = json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"baseRef":"HEAD"`, `"branch":"clb/run-1"`, `"worktree":"/path/to/wt"`} {
+		if !strings.Contains(string(body), key) {
+			t.Fatalf("worktree run JSON %s lacks %s", body, key)
+		}
+	}
+	plain := full
+	plain.BaseRef, plain.Branch, plain.Worktree = "", "", ""
+	body, err = json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"baseRef"`, `"branch"`, `"worktree"`} {
+		if strings.Contains(string(body), key) {
+			t.Fatalf("no-worktree run JSON included %s: %s", key, body)
+		}
+	}
+
+	resp := Response{Clean: &CleanResult{DryRun: true, Runs: []CleanedRun{
+		{ID: "run-1", Status: "finished", Repo: "/path/to/repo", Branch: "clb/run-1", Worktree: "/path/to/wt"},
+		{ID: "run-2", Status: "stopped", Repo: "/path/to/repo", Branch: "clb/run-2"},
+	}}}
+	body, err = json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), `"worktree":""`) || !strings.Contains(string(body), `"branch":"clb/run-2"`) {
+		t.Fatalf("clean JSON = %s", body)
+	}
+	var got Response
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Clean == nil || !got.Clean.DryRun || len(got.Clean.Runs) != 2 || got.Clean.Runs[1].Worktree != "" || got.Clean.Runs[1].Branch != "clb/run-2" {
+		t.Fatalf("clean = %+v", got.Clean)
+	}
+
+	empty, err := json.Marshal(Response{Clean: &CleanResult{Runs: []CleanedRun{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(empty), `"dryRun":false`) || !strings.Contains(string(empty), `"runs":[]`) {
+		t.Fatalf("empty clean JSON = %s", empty)
+	}
+}
+
 func TestBytesAfterTheRequestDoNotCancelTheCall(t *testing.T) {
 	started := make(chan struct{})
 	path := serve(t, listen(t), func(ctx context.Context, _ Request, send func(Response) error) error {
