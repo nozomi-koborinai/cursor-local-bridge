@@ -60,6 +60,7 @@ const (
 	scriptSlow
 	scriptCrash
 	scriptBackground
+	scriptTransport
 )
 
 func scriptFor(prompt string) script {
@@ -72,6 +73,8 @@ func scriptFor(prompt string) script {
 		return scriptPermission
 	case strings.Contains(prompt, "[background]"):
 		return scriptBackground
+	case strings.Contains(prompt, "[transport]"):
+		return scriptTransport
 	}
 	return scriptEcho
 }

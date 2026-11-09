@@ -74,6 +74,27 @@ func (r *recorder) types() []string {
 	return types
 }
 
+func TestParseLineClassifiesTransportError(t *testing.T) {
+	const text = "RetriableError: http/2 stream closed"
+	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`)
+	ev, res, ok := parseLine(line)
+	if !ok || res != nil {
+		t.Fatalf("parse = ok %v res %v", ok, res)
+	}
+	if ev.Type != backend.EventTransportError || ev.Text != "" {
+		t.Fatalf("event = %+v", ev)
+	}
+	if !strings.Contains(string(ev.Data), text) {
+		t.Fatalf("data = %s", ev.Data)
+	}
+
+	ordinary := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`)
+	ev, _, ok = parseLine(ordinary)
+	if !ok || ev.Type != "assistant" || ev.Text != "hello" {
+		t.Fatalf("ordinary = %+v ok %v", ev, ok)
+	}
+}
+
 func (r *recorder) text() string {
 	var b strings.Builder
 	for _, e := range r.snapshot() {

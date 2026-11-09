@@ -79,6 +79,18 @@ func runPrint(o printOptions, prompt string) error {
 			return err
 		}
 		crash()
+	case scriptTransport:
+		if err := assistant("before"); err != nil {
+			return err
+		}
+		if err := assistant("RetriableError: http/2 stream closed"); err != nil {
+			return err
+		}
+		reply = "after"
+		if err := assistant(reply); err != nil {
+			return err
+		}
+		reply = "before\nafter"
 	case scriptSlow:
 		for n := 1; n <= 2400; n++ {
 			reply = fmt.Sprintf("tick %d", n)
