@@ -44,6 +44,7 @@ var webhookInputs = []valueInput{
 type webhookSetupResult struct {
 	Config        string             `json:"config"`
 	WebhookHost   string             `json:"webhookHost"`
+	Secret        config.Secret      `json:"secret"`
 	SecretCreated bool               `json:"secretCreated"`
 	Test          *webhookTestResult `json:"test,omitempty"`
 }
@@ -97,8 +98,8 @@ func (a *app) runWebhookSetup(cmd *cobra.Command, test bool) error {
 		return err
 	}
 	rawURL, key := values[0], values[1]
-	if err := webhook.CheckHeaders(map[string]string{"Authorization": "Bearer " + key}); err != nil {
-		return err
+	if webhook.ValueHasControl(key) {
+		return errors.New("webhook key has a control character such as CR or LF")
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -108,13 +109,14 @@ func (a *app) runWebhookSetup(cmd *cobra.Command, test bool) error {
 	if err != nil {
 		return err
 	}
-	created, err := config.SaveWebhook(home, rawURL, "Bearer "+key)
+	created, err := config.SaveWebhook(home, rawURL, key)
 	if err != nil {
 		return err
 	}
 	result := webhookSetupResult{
 		Config:        filepath.Join(home, "config.json"),
 		WebhookHost:   parsed.Host,
+		Secret:        config.NewSecret(key),
 		SecretCreated: created,
 	}
 	if test {
@@ -215,11 +217,7 @@ func readHidden(cmd *cobra.Command, tty *os.File, prompt string) (string, error)
 }
 
 func stripBearerPrefix(s string) string {
-	const prefix = "bearer "
-	if len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix) {
-		return strings.TrimSpace(s[len(prefix):])
-	}
-	return s
+	return config.StripBearerPrefix(s)
 }
 
 func terminalFile(r io.Reader) (*os.File, bool) {

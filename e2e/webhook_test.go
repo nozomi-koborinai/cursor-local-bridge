@@ -19,6 +19,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/fakeagent/fakeagenttest"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 )
@@ -52,7 +53,7 @@ func TestWebhookCommands(t *testing.T) {
 		var got setupOutput
 		decode(t, []byte(stdout), &got)
 		host := mustHost(t, hooks.url)
-		if got.Config != filepath.Join(c.home, "config.json") || got.WebhookHost != host || !got.SecretCreated || got.Test == nil || got.Test.HTTPStatus != http.StatusNoContent {
+		if got.Config != filepath.Join(c.home, "config.json") || got.WebhookHost != host || got.Secret != config.MaskedSecret || !got.SecretCreated || got.Test == nil || got.Test.HTTPStatus != http.StatusNoContent {
 			t.Fatalf("stdout = %s", stdout)
 		}
 
@@ -60,14 +61,14 @@ func TestWebhookCommands(t *testing.T) {
 		if saved.AgentPath != agentPath || !saved.StoreAllEvents || saved.Webhook.URL != rawURL {
 			t.Fatalf("config = %+v", saved)
 		}
-		if saved.Webhook.Headers["Authorization"] != "Bearer "+key {
-			t.Fatalf("Authorization = %q", saved.Webhook.Headers["Authorization"])
+		if saved.Webhook.Secret != key || len(saved.Webhook.Headers) != 0 {
+			t.Fatalf("webhook = %+v", saved.Webhook)
 		}
 		assertMode(t, filepath.Join(c.home, "config.json"), 0o600)
-		assertNoSecret(t, stdout+stderr, key, saved.Webhook.Secret, "/setup-secret-path")
+		assertNoSecret(t, stdout+stderr, key, "/setup-secret-path")
 
 		testDelivery := hooks.wait(t, "test", "test", 1)[0]
-		checkDelivery(t, testDelivery, saved.Webhook.Secret, key)
+		checkDelivery(t, testDelivery, key, key)
 		if testDelivery.payload.Summary != "Test delivery from clb webhook test. No run changed." || testDelivery.payload.Event != "statusChange" {
 			t.Fatalf("test payload = %+v", testDelivery.payload)
 		}
@@ -76,7 +77,7 @@ func TestWebhookCommands(t *testing.T) {
 		launched := c.run(t, "launch", "--repo", repo, "hello")
 		finished := c.waitStatus(t, launched.ID, "finished")
 		runDelivery := hooks.wait(t, finished.ID, "finished", 1)[0]
-		checkDelivery(t, runDelivery, saved.Webhook.Secret, key)
+		checkDelivery(t, runDelivery, key, key)
 		if daemon.cmd.Process.Pid != pid || daemon.exited() {
 			t.Fatal("the daemon restarted")
 		}
@@ -107,8 +108,8 @@ func TestWebhookCommands(t *testing.T) {
 			t.Fatalf("transcript =\n%s", transcript)
 		}
 		saved := readSavedConfig(t, c.home)
-		assertNoSecret(t, transcript, key, saved.Webhook.Secret, "/pty-hidden-path")
-		if saved.Webhook.URL != rawURL || saved.Webhook.Headers["Authorization"] != "Bearer "+key {
+		assertNoSecret(t, transcript, key, "/pty-hidden-path")
+		if saved.Webhook.URL != rawURL || saved.Webhook.Secret != key || len(saved.Webhook.Headers) != 0 {
 			t.Fatalf("config = %+v", saved)
 		}
 	})
@@ -147,7 +148,7 @@ func TestWebhookCommands(t *testing.T) {
 			rawURL = "https://example.com/env-secret-path"
 		)
 		first := runSetupEnv(t, c, rawURL, key)
-		if !first.SecretCreated || first.WebhookHost != "example.com" {
+		if !first.SecretCreated || first.Secret != config.MaskedSecret || first.WebhookHost != "example.com" {
 			t.Fatalf("first = %+v", first)
 		}
 		path := filepath.Join(c.home, "config.json")
@@ -156,8 +157,8 @@ func TestWebhookCommands(t *testing.T) {
 			t.Fatal(err)
 		}
 		second := runSetupEnv(t, c, rawURL, key)
-		if second.SecretCreated {
-			t.Fatal("secretCreated = true on the second run")
+		if second.SecretCreated || second.Secret != config.MaskedSecret {
+			t.Fatalf("second = %+v", second)
 		}
 		after, err := os.ReadFile(path)
 		if err != nil {
@@ -167,7 +168,7 @@ func TestWebhookCommands(t *testing.T) {
 			t.Fatalf("second file =\n%s\nfirst file =\n%s", after, before)
 		}
 		saved := readSavedConfig(t, c.home)
-		if saved.Webhook.URL != rawURL || saved.Webhook.Headers["Authorization"] != "Bearer "+key {
+		if saved.Webhook.URL != rawURL || saved.Webhook.Secret != key || len(saved.Webhook.Headers) != 0 {
 			t.Fatalf("config = %+v", saved)
 		}
 	})
@@ -182,8 +183,8 @@ func TestWebhookCommands(t *testing.T) {
 		}
 		assertNoSecret(t, stdout+stderr, "the-key", "/bearer-path")
 		saved := readSavedConfig(t, c.home)
-		if saved.Webhook.Headers["Authorization"] != "Bearer the-key" {
-			t.Fatalf("Authorization = %q", saved.Webhook.Headers["Authorization"])
+		if saved.Webhook.Secret != "the-key" || len(saved.Webhook.Headers) != 0 {
+			t.Fatalf("webhook = %+v", saved.Webhook)
 		}
 	})
 
@@ -284,11 +285,79 @@ func TestWebhookCommands(t *testing.T) {
 		}
 		assertNoSecret(t, stdout+stderr, key, "/closed-secret-path", rawURL)
 	})
+
+	t.Run("legacy config migration and secret masking across CLI display commands", func(t *testing.T) {
+		c := &clb{path: bin, home: shortTempDir(t)}
+		hooks := newReceiver(t)
+		const (
+			legacyRandomSecret = "legacy-random-hex-secret-do-not-print"
+			legacyKey          = "legacy-bearer-key-do-not-print"
+			rotatedKey         = "rotated-webhook-key-do-not-print"
+		)
+		rawURL := hooks.url + "/legacy-secret-path"
+		writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
+			"agentPath": agentPath,
+			"webhook": map[string]any{
+				"url":    rawURL,
+				"secret": legacyRandomSecret,
+				"headers": map[string]string{
+					"Authorization": "Bearer " + legacyKey,
+				},
+			},
+		})
+		_ = startDaemon(t, c, t.TempDir())
+
+		cmd := c.command("webhook", "test")
+		stdout, stderr, code := runCLB(t, cmd)
+		if code != 0 {
+			t.Fatalf("webhook test exit %d\n%s", code, stderr)
+		}
+		assertNoSecret(t, stdout+stderr, legacyRandomSecret, legacyKey, "/legacy-secret-path")
+		checkDelivery(t, hooks.wait(t, "test", "test", 1)[0], legacyKey, legacyKey)
+
+		repo := gitRepo(t)
+		launchOut := string(c.output(t, "", "launch", "--repo", repo, "hello"))
+		assertNoSecret(t, launchOut, legacyRandomSecret, legacyKey, "/legacy-secret-path")
+		var launched struct {
+			ID string `json:"id"`
+		}
+		decode(t, []byte(launchOut), &launched)
+		_ = c.waitStatus(t, launched.ID, "finished")
+		checkDelivery(t, hooks.wait(t, launched.ID, "finished", 1)[0], legacyKey, legacyKey)
+
+		for _, args := range [][]string{
+			{"status", launched.ID},
+			{"list"},
+			{"logs", launched.ID},
+		} {
+			out := string(c.output(t, "", args...))
+			assertNoSecret(t, out, legacyRandomSecret, legacyKey, "/legacy-secret-path")
+		}
+
+		setupCmd := c.command("webhook", "setup", "--test")
+		setupCmd.Stdin = strings.NewReader(rawURL + "\n" + rotatedKey + "\n")
+		setupOut, setupErr, setupCode := runCLB(t, setupCmd)
+		if setupCode != 0 {
+			t.Fatalf("setup exit %d\n%s", setupCode, setupErr)
+		}
+		assertNoSecret(t, setupOut+setupErr, legacyRandomSecret, legacyKey, rotatedKey, "/legacy-secret-path")
+		var rotatedSetup setupOutput
+		decode(t, []byte(setupOut), &rotatedSetup)
+		if rotatedSetup.SecretCreated || rotatedSetup.Secret != config.MaskedSecret {
+			t.Fatalf("rotated setup = %+v", rotatedSetup)
+		}
+		saved := readSavedConfig(t, c.home)
+		if saved.Webhook.Secret != rotatedKey || len(saved.Webhook.Headers) != 0 {
+			t.Fatalf("saved after rotation = %+v", saved.Webhook)
+		}
+		checkDelivery(t, hooks.wait(t, "test", "test", 2)[1], rotatedKey, rotatedKey)
+	})
 }
 
 type setupOutput struct {
 	Config        string `json:"config"`
 	WebhookHost   string `json:"webhookHost"`
+	Secret        string `json:"secret"`
 	SecretCreated bool   `json:"secretCreated"`
 	Test          *struct {
 		HTTPStatus int `json:"httpStatus"`

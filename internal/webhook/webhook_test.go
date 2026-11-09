@@ -106,6 +106,9 @@ func TestSendPostsSignedPayload(t *testing.T) {
 	if hdr.Get(SignatureHeader) != Sign(secret, got) || !Verify(secret, got, hdr.Get(SignatureHeader)) {
 		t.Fatalf("signature = %s", hdr.Get(SignatureHeader))
 	}
+	if hdr.Get("Authorization") != "Bearer "+string(secret) {
+		t.Fatalf("Authorization = %q, want %q", hdr.Get("Authorization"), "Bearer "+string(secret))
+	}
 	var decoded Payload
 	if err := json.Unmarshal(got, &decoded); err != nil {
 		t.Fatal(err)
@@ -199,6 +202,25 @@ func TestSendPermissionPayload(t *testing.T) {
 	}
 	if decoded.Event != EventPermissionReminder || decoded.Reminder != 2 || header.Get(EventHeader) != EventPermissionReminder {
 		t.Fatalf("reminder payload = %+v header %s", decoded, header.Get(EventHeader))
+	}
+}
+
+func TestSendOmitsBearerWhenSecretIsEmpty(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	status, err := (&Sender{URL: srv.URL}).Send(t.Context(), Payload{Event: EventStatusChange, RunID: "run-1", Status: "finished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusNoContent {
+		t.Fatalf("status = %d", status)
+	}
+	if auth != "" {
+		t.Fatalf("Authorization = %q", auth)
 	}
 }
 

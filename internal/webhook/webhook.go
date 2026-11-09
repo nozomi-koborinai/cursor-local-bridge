@@ -68,7 +68,7 @@ func CheckHeaders(headers map[string]string) error {
 		if strings.HasPrefix(canon, clbHeaderPrefix) {
 			return fmt.Errorf("header %q is in clb's namespace and cannot be set", name)
 		}
-		if headerValueHasControl(headers[name]) {
+		if ValueHasControl(headers[name]) {
 			return fmt.Errorf("header %q value has a control character such as CR or LF", name)
 		}
 		if prev, ok := seen[canon]; ok {
@@ -100,7 +100,9 @@ func isTChar(b byte) bool {
 	}
 }
 
-func headerValueHasControl(v string) bool {
+// ValueHasControl reports whether v contains a byte that cannot be sent in an
+// HTTP header value. Tab is allowed. CR, LF, and NUL are not.
+func ValueHasControl(v string) bool {
 	for i := 0; i < len(v); i++ {
 		b := v[i]
 		if (b < 0x20 && b != '\t') || b == 0x7f {
@@ -201,7 +203,7 @@ func (s *Sender) Send(ctx context.Context, p Payload) (int, error) {
 				backoff *= 2
 			}
 		}
-		code, err := post(ctx, client, s.URL, body, sig, p.Event, delivery, s.Header)
+		code, err := post(ctx, client, s.URL, body, s.Secret, sig, p.Event, delivery, s.Header)
 		if code != 0 {
 			status = code
 		}
@@ -233,12 +235,15 @@ func wait(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func post(ctx context.Context, client *http.Client, endpoint string, body []byte, sig, event, delivery string, extra http.Header) (int, error) {
+func post(ctx context.Context, client *http.Client, endpoint string, body, secret []byte, sig, event, delivery string, extra http.Header) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("webhook POST: %w", withoutURL(err))
 	}
 	maps.Copy(req.Header, extra)
+	if len(secret) > 0 && req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Bearer "+string(secret))
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set(SignatureHeader, sig)
