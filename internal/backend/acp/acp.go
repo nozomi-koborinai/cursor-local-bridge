@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -125,7 +126,10 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 
 	init, err := conn.Initialize(ctx, acpsdk.InitializeRequest{
 		ProtocolVersion: acpsdk.ProtocolVersionNumber,
-		ClientInfo:      &acpsdk.Implementation{Name: "clb", Version: clientVersion()},
+		ClientCapabilities: acpsdk.ClientCapabilities{
+			Meta: map[string]any{"parameterizedModelPicker": true},
+		},
+		ClientInfo: &acpsdk.Implementation{Name: "clb", Version: clientVersion()},
 	})
 	if err != nil {
 		return "", s.failure(conn, "initialize", err)
@@ -136,6 +140,7 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 		}
 	}
 
+	var configOptions []acpsdk.SessionConfigOption
 	id := acpsdk.SessionId(opts.ResumeSessionID)
 	if id == "" {
 		resp, err := conn.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: dir, McpServers: []acpsdk.McpServer{}})
@@ -143,21 +148,67 @@ func (s *Session) start(ctx context.Context, opts backend.StartOptions) (acpsdk.
 			return "", s.failure(conn, "session/new", err)
 		}
 		id = resp.SessionId
+		configOptions = resp.ConfigOptions
 	} else {
 		// The SDK returns from LoadSession only after the handlers for every
 		// notification received before the response have run, so the flag
 		// covers the whole replay.
 		s.replaying.Store(true)
-		_, err := conn.LoadSession(ctx, acpsdk.LoadSessionRequest{SessionId: id, Cwd: dir, McpServers: []acpsdk.McpServer{}})
+		resp, err := conn.LoadSession(ctx, acpsdk.LoadSessionRequest{SessionId: id, Cwd: dir, McpServers: []acpsdk.McpServer{}})
 		s.replaying.Store(false)
 		if err != nil {
 			return "", s.failure(conn, "session/load", err)
 		}
+		configOptions = resp.ConfigOptions
 	}
+	s.reportModel(configOptions)
 	s.mu.Lock()
 	s.id = id
 	s.mu.Unlock()
 	return id, nil
+}
+
+func (s *Session) reportModel(options []acpsdk.SessionConfigOption) {
+	mr, ok := s.sink.(backend.ModelReporter)
+	if !ok {
+		return
+	}
+	if m := sessionModel(options); m != "" {
+		mr.SetModel(m)
+	}
+}
+
+func sessionModel(options []acpsdk.SessionConfigOption) string {
+	var model string
+	var params []string
+	for _, opt := range options {
+		sel := opt.Select
+		if sel == nil {
+			continue
+		}
+		id := string(sel.Id)
+		val := strings.TrimSpace(string(sel.CurrentValue))
+		if id == "mode" || val == "" {
+			continue
+		}
+		if id == "model" || (sel.Category != nil && *sel.Category == acpsdk.SessionConfigOptionCategoryModel) {
+			model = val
+			continue
+		}
+		if sel.Category != nil {
+			switch *sel.Category {
+			case acpsdk.SessionConfigOptionCategoryThoughtLevel, "model_config":
+				params = append(params, id+"="+val)
+			}
+		}
+	}
+	if model == "" {
+		return ""
+	}
+	if len(params) == 0 || strings.Contains(model, "[") {
+		return model
+	}
+	return model + "[" + strings.Join(params, ",") + "]"
 }
 
 func (s *Session) authenticate(ctx context.Context, conn *acpsdk.ClientSideConnection) error {
@@ -333,6 +384,9 @@ func (c client) SessionUpdate(_ context.Context, n acpsdk.SessionNotification) e
 		} else {
 			ev.Text = text
 		}
+	}
+	if upd := n.Update.ConfigOptionUpdate; upd != nil {
+		c.s.reportModel(upd.ConfigOptions)
 	}
 	c.s.sink.Event(ev)
 	return nil

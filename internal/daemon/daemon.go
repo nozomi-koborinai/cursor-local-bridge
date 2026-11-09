@@ -252,6 +252,11 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	}
 	now := time.Now().UTC()
 	lc, effects := lifecycle.Launch(req.Prompt)
+	requested := d.configuredModel(req.Model)
+	display := requested
+	if display == "" {
+		display = config.CLIDefaultModel()
+	}
 	run := store.Run{
 		ID:        id,
 		Repo:      repo,
@@ -259,13 +264,33 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 		Branch:    "clb/" + string(id),
 		Worktree:  filepath.Join(d.cfg.WorktreeDir, string(id)),
 		Backend:   kind,
-		Model:     cmp.Or(req.Model, d.cfg.Model),
+		Model:     encodeRunModel(requested, display),
 		Lifecycle: lc,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	a := d.actor(id)
 	return a.call(ctx, func() error { return a.create(run, effects) })
+}
+
+func (d *Daemon) configuredModel(requested string) string {
+	if m := cleanModel(requested); m != "" {
+		return m
+	}
+	if d.cfg.Home != "" {
+		if loaded, err := config.Load(d.cfg.Home); err == nil {
+			return cleanModel(loaded.Model)
+		}
+	}
+	return cleanModel(d.cfg.Model)
+}
+
+func cleanModel(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 func (d *Daemon) command(ctx context.Context, id store.RunID, e lifecycle.Event) (store.Run, error) {
@@ -354,6 +379,7 @@ func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 }
 
 func toIPCRun(r store.Run) ipc.Run {
+	_, model := splitRunModel(r.Model)
 	out := ipc.Run{
 		ID:            string(r.ID),
 		Status:        string(r.Lifecycle.State),
@@ -362,7 +388,7 @@ func toIPCRun(r store.Run) ipc.Run {
 		Branch:        r.Branch,
 		Worktree:      r.Worktree,
 		Backend:       string(r.Backend),
-		Model:         r.Model,
+		Model:         model,
 		SessionID:     r.SessionID,
 		Summary:       r.Summary,
 		Error:         r.Lifecycle.Error,

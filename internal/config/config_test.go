@@ -846,3 +846,92 @@ func writeConfigMode(t *testing.T, home, body string, mode os.FileMode) {
 		t.Fatalf("mode = %#o, want %#o", info.Mode().Perm(), mode)
 	}
 }
+
+func TestCLIDefaultModel(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "selectedModel with parameters",
+			body: `{
+				"model": {"modelId": "claude-opus-5-5-high", "displayModelId": "claude-opus-5-5", "displayName": "Claude Opus 5.5"},
+				"selectedModel": {
+					"modelId": "claude-opus-5-5",
+					"parameters": [
+						{"id": "thinking", "value": "true"},
+						{"id": "context", "value": "300k"},
+						{"id": "effort", "value": "xhigh"},
+						{"id": "fast", "value": "false"}
+					]
+				}
+			}`,
+			want: "claude-opus-5-5[thinking=true,context=300k,effort=xhigh,fast=false]",
+		},
+		{
+			name: "selectedModel uses modelParameters fallback",
+			body: `{
+				"selectedModel": {"modelId": "grok-4.7"},
+				"modelParameters": {
+					"grok-4.7": [
+						{"id": "context", "value": "256k"},
+						{"id": "reasoning_effort", "value": "high"},
+						{"id": "fast", "value": "false"}
+					]
+				}
+			}`,
+			want: "grok-4.7[context=256k,reasoning_effort=high,fast=false]",
+		},
+		{
+			name: "legacy model with modelParameters",
+			body: `{
+				"model": {"modelId": "claude-opus-5-5", "displayName": "Claude Opus 5.5"},
+				"modelParameters": {
+					"claude-opus-5-5": [{"id": "effort", "value": "high"}]
+				}
+			}`,
+			want: "claude-opus-5-5[effort=high]",
+		},
+		{
+			name: "legacy model without parameters",
+			body: `{"model": {"modelId": "gpt-5", "displayName": "GPT-5"}}`,
+			want: "gpt-5",
+		},
+		{
+			name: "empty config",
+			body: `{}`,
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CURSOR_CONFIG_DIR", dir)
+			if err := os.WriteFile(filepath.Join(dir, "cli-config.json"), []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := CLIDefaultModel(); got != tt.want {
+				t.Fatalf("CLIDefaultModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("XDG_CONFIG_HOME fallback", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("CURSOR_CONFIG_DIR", "")
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		cursorDir := filepath.Join(xdg, "cursor")
+		if err := os.MkdirAll(cursorDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"selectedModel":{"modelId":"composer-2.5","parameters":[{"id":"fast","value":"false"}]}}`
+		if err := os.WriteFile(filepath.Join(cursorDir, "cli-config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want := "composer-2.5[fast=false]"
+		if got := CLIDefaultModel(); got != want {
+			t.Fatalf("CLIDefaultModel() = %q, want %q", got, want)
+		}
+	})
+}

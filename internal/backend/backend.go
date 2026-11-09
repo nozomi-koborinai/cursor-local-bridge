@@ -91,3 +91,9 @@ type Sink interface {
 	// Permission blocks until the request is answered or ctx ends.
 	Permission(ctx context.Context, req PermissionRequest) (approve bool, err error)
 }
+
+// ModelReporter is an optional Sink extension that records the model and
+// effort resolved for the session.
+type ModelReporter interface {
+	SetModel(model string)
+}

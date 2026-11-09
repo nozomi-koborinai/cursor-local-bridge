@@ -588,3 +588,94 @@ func bearerToken(value string) (string, bool) {
 	}
 	return token, true
 }
+
+// CLIDefaultModel reads the requested model and its parameters from the Cursor
+// CLI's cli-config.json ($CURSOR_CONFIG_DIR/cli-config.json,
+// $XDG_CONFIG_HOME/cursor/cli-config.json, or ~/.cursor/cli-config.json). It
+// returns an empty string when no file or model is configured.
+func CLIDefaultModel() string {
+	path := cliConfigPath()
+	if path == "" {
+		return ""
+	}
+	return readCLIModel(path)
+}
+
+func cliConfigPath() string {
+	if dir := strings.TrimSpace(os.Getenv("CURSOR_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "cli-config.json")
+	}
+	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+		return filepath.Join(dir, "cursor", "cli-config.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cursor", "cli-config.json")
+}
+
+type cliParam struct {
+	ID    string `json:"id"`
+	Value string `json:"value"`
+}
+
+func readCLIModel(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		SelectedModel *struct {
+			ModelID    string     `json:"modelId"`
+			Parameters []cliParam `json:"parameters"`
+		} `json:"selectedModel"`
+		ModelParameters map[string][]cliParam `json:"modelParameters"`
+		Model           *struct {
+			ModelID        string `json:"modelId"`
+			DisplayModelID string `json:"displayModelId"`
+			DisplayName    string `json:"displayName"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	if s := cfg.SelectedModel; s != nil && s.ModelID != "" {
+		params := s.Parameters
+		if len(params) == 0 {
+			params = cfg.ModelParameters[s.ModelID]
+		}
+		return formatModelParams(s.ModelID, params)
+	}
+	if m := cfg.Model; m != nil {
+		id := m.ModelID
+		if id == "" {
+			id = m.DisplayModelID
+		}
+		if id != "" {
+			params := cfg.ModelParameters[id]
+			if len(params) == 0 && m.DisplayModelID != "" {
+				params = cfg.ModelParameters[m.DisplayModelID]
+			}
+			return formatModelParams(id, params)
+		}
+		return m.DisplayName
+	}
+	return ""
+}
+
+func formatModelParams(modelID string, params []cliParam) string {
+	if len(params) == 0 || strings.Contains(modelID, "[") {
+		return modelID
+	}
+	var parts []string
+	for _, p := range params {
+		if p.ID != "" && p.Value != "" {
+			parts = append(parts, p.ID+"="+p.Value)
+		}
+	}
+	if len(parts) == 0 {
+		return modelID
+	}
+	return modelID + "[" + strings.Join(parts, ",") + "]"
+}

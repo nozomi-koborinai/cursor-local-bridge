@@ -138,6 +138,7 @@ type generation struct {
 	cancel    context.CancelFunc
 	session   Session
 	closed    chan struct{}
+	model     string
 	turn      turnSummary
 	retries   int
 	answers   map[string]chan<- permResult
@@ -441,14 +442,15 @@ func (a *actor) startBackend(run store.Run, resume bool) {
 	a.sweeper = g
 	a.sweepMu.Unlock()
 
-	opts := backend.StartOptions{Dir: run.Worktree, Model: run.Model}
+	requested, _ := splitRunModel(run.Model)
+	opts := backend.StartOptions{Dir: run.Worktree, Model: requested}
 	if resume {
 		opts.ResumeSessionID = run.SessionID
 	}
 	a.d.wg.Go(func() {
 		defer close(g.closed)
 		sessionID, err := g.session.Start(ctx, opts)
-		a.postFrom(g, func() { a.started(sessionID, err) })
+		a.postFrom(g, func() { a.started(g, sessionID, err) })
 		<-ctx.Done()
 		if err := g.session.Close(); err != nil {
 			a.d.log.Warn("close agent session", "run", a.id, "err", err)
@@ -468,12 +470,67 @@ func (a *actor) sweep(g *generation, dir string) {
 	}
 }
 
-func (a *actor) started(sessionID string, err error) {
+func (a *actor) started(g *generation, sessionID string, err error) {
 	if err != nil {
 		a.fail(fmt.Errorf("start agent: %w", err))
 		return
 	}
-	a.record(lifecycle.Started{}, func(r *store.Run) { r.SessionID = sessionID })
+	a.record(lifecycle.Started{}, func(r *store.Run) {
+		r.SessionID = sessionID
+		if g.model != "" {
+			r.Model = mergeRunModel(r.Model, g.model)
+		}
+	})
+}
+
+func (a *actor) setModel(g *generation, model string) {
+	g.model = model
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		a.d.log.Error("get run for model update", "run", a.id, "err", err)
+		return
+	}
+	next := mergeRunModel(run.Model, model)
+	if next == run.Model {
+		return
+	}
+	run.Model = next
+	run.UpdatedAt = time.Now().UTC()
+	if _, err := a.d.store.UpdateRun(a.d.writes, run); err != nil {
+		a.d.log.Error("update run model", "run", a.id, "err", err)
+	}
+}
+
+func encodeRunModel(requested, display string) string {
+	if requested == display {
+		return display
+	}
+	return requested + "\n" + display
+}
+
+func splitRunModel(stored string) (requested, display string) {
+	if req, disp, ok := strings.Cut(stored, "\n"); ok {
+		return req, disp
+	}
+	return stored, stored
+}
+
+func mergeRunModel(stored, reported string) string {
+	reported = cleanModel(reported)
+	if reported == "" {
+		return stored
+	}
+	requested, display := splitRunModel(stored)
+	if requested == "" {
+		if !strings.Contains(reported, "[") && strings.HasPrefix(display, reported+"[") {
+			return encodeRunModel(requested, display)
+		}
+		return encodeRunModel(requested, reported)
+	}
+	if !strings.Contains(requested, "[") && strings.HasPrefix(reported, requested+"[") {
+		return encodeRunModel(requested, reported)
+	}
+	return encodeRunModel(requested, display)
 }
 
 func (a *actor) sendPrompt(prompt string) {
@@ -877,6 +934,10 @@ type sink struct {
 
 func (s sink) Event(e backend.Event) {
 	s.a.postFrom(s.g, func() { s.a.agentEvent(s.g, e) })
+}
+
+func (s sink) SetModel(model string) {
+	s.a.postFrom(s.g, func() { s.a.setModel(s.g, model) })
 }
 
 var (

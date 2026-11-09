@@ -14,7 +14,8 @@ import (
 const cursorLogin = "cursor_login"
 
 type fakeACP struct {
-	model string
+	model         string
+	parameterized bool
 
 	mu            sync.Mutex
 	conn          *acp.AgentSideConnection
@@ -37,7 +38,10 @@ func runACP(model string) error {
 	return nil
 }
 
-func (a *fakeACP) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {
+func (a *fakeACP) Initialize(_ context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
+	a.mu.Lock()
+	a.parameterized, _ = req.ClientCapabilities.Meta["parameterizedModelPicker"].(bool)
+	a.mu.Unlock()
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		AgentCapabilities: acp.AgentCapabilities{
@@ -94,7 +98,10 @@ func (a *fakeACP) NewSession(_ context.Context, req acp.NewSessionRequest) (acp.
 	a.mu.Lock()
 	a.chats[acp.SessionId(c.ID)] = c
 	a.mu.Unlock()
-	return acp.NewSessionResponse{SessionId: acp.SessionId(c.ID)}, nil
+	return acp.NewSessionResponse{
+		SessionId:     acp.SessionId(c.ID),
+		ConfigOptions: a.configOptions(),
+	}, nil
 }
 
 func (a *fakeACP) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
@@ -116,7 +123,59 @@ func (a *fakeACP) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (
 	a.mu.Lock()
 	a.chats[req.SessionId] = c
 	a.mu.Unlock()
-	return acp.LoadSessionResponse{}, nil
+	return acp.LoadSessionResponse{ConfigOptions: a.configOptions()}, nil
+}
+
+func (a *fakeACP) configOptions() []acp.SessionConfigOption {
+	model := a.model
+	if model == "" {
+		return nil
+	}
+	a.mu.Lock()
+	parameterized := a.parameterized
+	a.mu.Unlock()
+	if !parameterized {
+		// In variants mode the real CLI snaps non-default parameters to the
+		// single advertised variant for the model.
+		if base, _, ok := strings.Cut(model, "["); ok {
+			model = base + "[effort=medium,fast=true]"
+		}
+		return []acp.SessionConfigOption{selectOption("model", acp.SessionConfigOptionCategoryModel, model)}
+	}
+	base, rest, ok := strings.Cut(model, "[")
+	if !ok {
+		return []acp.SessionConfigOption{selectOption("model", acp.SessionConfigOptionCategoryModel, model)}
+	}
+	opts := []acp.SessionConfigOption{selectOption("model", acp.SessionConfigOptionCategoryModel, base)}
+	rest = strings.TrimSuffix(rest, "]")
+	for part := range strings.SplitSeq(rest, ",") {
+		k, v, ok := strings.Cut(part, "=")
+		if !ok || k == "" || v == "" {
+			continue
+		}
+		cat := acp.SessionConfigOptionCategory("model_config")
+		if k == "effort" || k == "reasoning" || k == "reasoning_effort" || k == "thinking" {
+			cat = acp.SessionConfigOptionCategoryThoughtLevel
+		}
+		opts = append(opts, selectOption(k, cat, v))
+	}
+	return opts
+}
+
+func selectOption(id string, cat acp.SessionConfigOptionCategory, current string) acp.SessionConfigOption {
+	options := acp.SessionConfigSelectOptionsUngrouped{
+		{Value: acp.SessionConfigValueId(current), Name: current},
+	}
+	return acp.SessionConfigOption{
+		Select: &acp.SessionConfigOptionSelect{
+			Id:           acp.SessionConfigId(id),
+			Name:         id,
+			Category:     &cat,
+			Type:         "select",
+			CurrentValue: acp.SessionConfigValueId(current),
+			Options:      acp.SessionConfigSelectOptions{Ungrouped: &options},
+		},
+	}
 }
 
 func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.PromptResponse, error) {
