@@ -12,7 +12,9 @@ import (
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend/proc"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/policy"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/worktree"
@@ -52,6 +54,8 @@ type permissionAnsweredData struct {
 	Approved bool   `json:"approved"`
 	Option   string `json:"option,omitempty"`
 	OptionID string `json:"optionId,omitempty"`
+	Auto     bool   `json:"auto,omitempty"`
+	Rule     string `json:"rule,omitempty"`
 }
 
 type permissionCancelledData struct {
@@ -144,6 +148,8 @@ type actor struct {
 	closing     *generation
 	state       lifecycle.State
 	stall       *time.Timer
+	policy      *policy.Policy
+	repoPolicy  *policy.Policy
 	perms       int
 	permRetries map[string]int
 	carried     []store.NewEvent
@@ -728,6 +734,11 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, w 
 		Options:    req.Options,
 		Retries:    g.retries,
 	}
+	if dec := a.evaluatePolicy(p); dec.Matched {
+		if a.answerByPolicy(p, dec, w) {
+			return
+		}
+	}
 	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
 	if err != nil || !hasPermission(run.Lifecycle, p.ID) {
 		sendResult(w.answer, permResult{decision: backend.PermissionDecision{Approved: false, Option: backend.OptionRejectOnce}})
@@ -738,6 +749,174 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, w 
 		return
 	}
 	g.answers[p.ID] = w.answer
+}
+
+func (a *actor) evaluatePolicy(p lifecycle.Permission) policy.Decision {
+	if a.policy == nil && a.repoPolicy == nil {
+		if run, err := a.d.store.GetRun(a.d.writes, a.id); err == nil {
+			policyPath, repoSnap := splitRunPolicy(run.Policy)
+			if policyPath != "" {
+				loaded, err := policy.LoadFile(policyPath)
+				if err != nil {
+					a.d.log.Warn("load run policy", "run", a.id, "policy", policyPath, "err", err)
+					return policy.Decision{Action: policy.DecisionAsk}
+				}
+				a.policy = &loaded
+			} else {
+				a.repoPolicy = &repoSnap
+			}
+		}
+	}
+	if a.policy != nil {
+		return a.policy.Evaluate(p.Kind, p.Command, p.URL)
+	}
+	cfg := a.d.cfg
+	if cfg.Home != "" {
+		loaded, err := config.Load(cfg.Home)
+		if err != nil {
+			a.d.log.Warn("load config for policy", "run", a.id, "err", err)
+			return policy.Decision{Action: policy.DecisionAsk}
+		}
+		cfg = loaded
+	}
+	pol, err := cfg.LoadPolicy()
+	if err != nil {
+		a.d.log.Warn("load global policy", "run", a.id, "err", err)
+		return policy.Decision{Action: policy.DecisionAsk}
+	}
+	if a.repoPolicy != nil && !a.repoPolicy.IsEmpty() {
+		pol = pol.Merge(*a.repoPolicy)
+	}
+	return pol.Evaluate(p.Kind, p.Command, p.URL)
+}
+
+func encodeRunPolicy(policyPath string, repoPolicy *policy.Policy) string {
+	if policyPath != "" {
+		return policyPath
+	}
+	if repoPolicy == nil || repoPolicy.IsEmpty() {
+		return ""
+	}
+	raw, err := json.Marshal(*repoPolicy)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func splitRunPolicy(stored string) (policyPath string, repoPolicy policy.Policy) {
+	trimmed := strings.TrimSpace(stored)
+	if trimmed == "" {
+		return "", policy.Policy{}
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		p, err := policy.Parse("repo-policy", []byte(trimmed))
+		if err != nil {
+			return "", policy.Policy{}
+		}
+		return "", p
+	}
+	return stored, policy.Policy{}
+}
+
+func (a *actor) answerByPolicy(p lifecycle.Permission, dec policy.Decision, w *permWait) bool {
+	run, err := a.d.store.GetRun(a.d.writes, a.id)
+	if err != nil {
+		return false
+	}
+	if run.Lifecycle.State != lifecycle.Running && run.Lifecycle.State != lifecycle.AwaitingPermission {
+		sendResult(w.answer, permResult{decision: backend.PermissionDecision{Approved: false, Option: backend.OptionRejectOnce}})
+		return true
+	}
+	a.hydrateRetries(&run.Lifecycle)
+	next, effects, err := lifecycle.Apply(run.Lifecycle, lifecycle.PermissionRequested{Permission: p})
+	if err != nil {
+		return false
+	}
+	var cancels []lifecycle.CancelPermission
+	for _, eff := range effects {
+		if c, ok := eff.(lifecycle.CancelPermission); ok {
+			cancels = append(cancels, c)
+		}
+	}
+	if len(cancels) > 0 {
+		kept, _ := withoutPermission(next.Permissions, p.ID)
+		next.Permissions = kept
+		if len(next.Permissions) == 0 {
+			next.State = lifecycle.Running
+		} else {
+			next.State = lifecycle.AwaitingPermission
+		}
+		a.rememberRetries(next)
+		changed := next.State != run.Lifecycle.State
+		a.state = next.State
+		run.Lifecycle = next
+		at := time.Now().UTC()
+		var events []store.NewEvent
+		for _, c := range cancels {
+			ev, err := newEvent(at, eventPermissionCancelled, permissionCancelledData{
+				ID:           c.ID,
+				Reason:       string(c.Reason),
+				SupersededBy: c.SupersededBy,
+			})
+			if err != nil {
+				return false
+			}
+			events = append(events, ev)
+		}
+		if changed {
+			ev, err := newEvent(at, eventStatus, statusData{Status: next.State, Error: next.Error})
+			if err != nil {
+				return false
+			}
+			events = append(events, ev)
+		}
+		run.UpdatedAt = at
+		appended, err := a.d.store.UpdateRun(a.d.writes, run, events...)
+		if err != nil {
+			return false
+		}
+		a.d.setRunActive(a.id, next.State.Active())
+		for _, ev := range appended {
+			a.appendNDJSON(ev)
+		}
+		for _, c := range cancels {
+			a.cancelPermission(c)
+		}
+		a.syncStall(changed)
+	}
+	a.appendEvent(eventPermissionRequested, p)
+	a.appendEvent(eventPermissionAnswered, permissionAnsweredData{
+		ID:       p.ID,
+		Approved: dec.Approve,
+		Auto:     true,
+		Rule:     dec.Rule,
+	})
+	opt := backend.OptionRejectOnce
+	if dec.Approve {
+		opt = backend.OptionAllowOnce
+	}
+	sendResult(w.answer, permResult{decision: backend.PermissionDecision{Approved: dec.Approve, Option: opt}})
+	return true
+}
+
+func withoutPermission(perms []lifecycle.Permission, id string) ([]lifecycle.Permission, bool) {
+	next := make([]lifecycle.Permission, 0, len(perms))
+	found := false
+	for _, p := range perms {
+		if p.ID == id {
+			found = true
+			continue
+		}
+		next = append(next, p)
+	}
+	if !found {
+		return perms, false
+	}
+	if len(next) == 0 {
+		return nil, true
+	}
+	return next, true
 }
 
 // nextPermissionID counts from the stored events, so IDs stay unique across

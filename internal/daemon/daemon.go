@@ -23,6 +23,7 @@ import (
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/config"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/ipc"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/lifecycle"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/policy"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/store"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/worktree"
@@ -281,6 +282,23 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 	if err := d.rejectUntrustedPrint(kind); err != nil {
 		return store.Run{}, err
 	}
+	var runPolicy, repoPolicy *policy.Policy
+	if req.Policy != "" {
+		if !filepath.IsAbs(req.Policy) {
+			return store.Run{}, invalid(fmt.Sprintf("policy %q is not an absolute path", req.Policy))
+		}
+		loaded, err := policy.LoadFile(req.Policy)
+		if err != nil {
+			return store.Run{}, invalid(fmt.Sprintf("policy: %v", err))
+		}
+		runPolicy = &loaded
+	} else {
+		loadedRepo, err := policy.LoadRepo(repo)
+		if err != nil {
+			return store.Run{}, invalid(fmt.Sprintf("policy: %v", err))
+		}
+		repoPolicy = &loadedRepo
+	}
 	id, err := newRunID()
 	if err != nil {
 		return store.Run{}, err
@@ -305,12 +323,17 @@ func (d *Daemon) launch(ctx context.Context, req ipc.Request) (store.Run, error)
 		Worktree:  worktreePath,
 		Backend:   kind,
 		Model:     encodeRunModel(requested, display),
+		Policy:    encodeRunPolicy(req.Policy, repoPolicy),
 		Lifecycle: lc,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	a := d.actor(id)
-	return a.call(ctx, func() error { return a.create(run, effects) })
+	return a.call(ctx, func() error {
+		a.policy = runPolicy
+		a.repoPolicy = repoPolicy
+		return a.create(run, effects)
+	})
 }
 
 func (d *Daemon) configuredModel(requested string) string {
@@ -543,6 +566,7 @@ func (d *Daemon) rewriteLog(ctx context.Context, id store.RunID) error {
 
 func toIPCRun(r store.Run) ipc.Run {
 	_, model := splitRunModel(r.Model)
+	policyPath, _ := splitRunPolicy(r.Policy)
 	out := ipc.Run{
 		ID:            string(r.ID),
 		Status:        string(r.Lifecycle.State),
@@ -552,6 +576,7 @@ func toIPCRun(r store.Run) ipc.Run {
 		Worktree:      r.Worktree,
 		Backend:       string(r.Backend),
 		Model:         model,
+		Policy:        policyPath,
 		SessionID:     r.SessionID,
 		AgentVersion:  r.AgentVersion,
 		Summary:       r.Summary,

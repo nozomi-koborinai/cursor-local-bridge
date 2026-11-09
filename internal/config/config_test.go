@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/policy"
 )
 
 func TestLoadMissingFile(t *testing.T) {
@@ -377,6 +378,95 @@ func TestLoadStallTimeoutAndKeepAwake(t *testing.T) {
 	}
 }
 
+func TestLoadPolicy(t *testing.T) {
+	t.Run("default policy.json in home", func(t *testing.T) {
+		home := testHome(t)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol, err := got.LoadPolicy()
+		if err != nil || !pol.IsEmpty() {
+			t.Fatalf("missing policy.json = %+v, %v", pol, err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "policy.json"), []byte(`{"allow":{"commands":["echo","rg"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pol, err = got.LoadPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := policy.Policy{Allow: policy.RuleSet{Commands: []string{"echo", "rg"}}}
+		if !reflect.DeepEqual(pol, want) {
+			t.Fatalf("default policy.json = %+v, want %+v", pol, want)
+		}
+	})
+
+	t.Run("relative policy path in config.json", func(t *testing.T) {
+		home := testHome(t)
+		if err := os.WriteFile(filepath.Join(home, "rules.json"), []byte(`{"allow":{"fetch":["example.com"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeConfig(t, home, `{"policy":"rules.json"}`)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Policy.Path != filepath.Join(home, "rules.json") {
+			t.Fatalf("policy path = %q", got.Policy.Path)
+		}
+		pol, err := got.LoadPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := policy.Policy{Allow: policy.RuleSet{Fetch: []string{"example.com"}}}
+		if !reflect.DeepEqual(pol, want) {
+			t.Fatalf("policy = %+v, want %+v", pol, want)
+		}
+	})
+
+	t.Run("inline policy object in config.json", func(t *testing.T) {
+		home := testHome(t)
+		writeConfig(t, home, `{"policy":{"allow":{"commands":["go test *"],"fetch":["docs.example.com"]}}}`)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol, err := got.LoadPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := policy.Policy{
+			Allow: policy.RuleSet{
+				Commands: []string{"go test *"},
+				Fetch:    []string{"docs.example.com"},
+			},
+		}
+		if !reflect.DeepEqual(pol, want) {
+			t.Fatalf("inline policy = %+v, want %+v", pol, want)
+		}
+	})
+
+	t.Run("empty inline policy object overrides default policy.json", func(t *testing.T) {
+		home := testHome(t)
+		if err := os.WriteFile(filepath.Join(home, "policy.json"), []byte(`{"allow":{"commands":["echo"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeConfig(t, home, `{"policy":{}}`)
+		got, err := Load(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pol, err := got.LoadPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !pol.IsEmpty() {
+			t.Fatalf("empty inline policy loaded %+v, want empty override", pol)
+		}
+	})
+}
+
 func TestLoadRejectsInvalidFiles(t *testing.T) {
 	tests := []struct {
 		name string
@@ -399,6 +489,9 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{name: "invalid stallTimeout", body: `{"stallTimeout":"ten-minutes"}`, want: "stallTimeout"},
 		{name: "negative stallTimeout", body: `{"stallTimeout":"-5s"}`, want: "stallTimeout"},
 		{name: "numeric stallTimeout", body: `{"stallTimeout":60}`, want: "stallTimeout"},
+		{name: "missing policy file", body: `{"policy":"no-such-policy.json"}`, want: "policy"},
+		{name: "invalid inline policy", body: `{"policy":{"allow":{"commands":[""]}}}`, want: "policy"},
+		{name: "unknown field in inline policy", body: `{"policy":{"unknown":true}}`, want: "policy"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

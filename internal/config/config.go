@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/backend"
+	"github.com/nozomi-koborinai/cursor-local-bridge/internal/policy"
 	"github.com/nozomi-koborinai/cursor-local-bridge/internal/webhook"
 )
 
@@ -134,6 +135,9 @@ type Config struct {
 	// KeepAwake holds a power assertion on macOS (caffeinate) while at least
 	// one run is active. Default false.
 	KeepAwake bool `json:"keepAwake"`
+	// Policy configures automatic permission decisions, either as a path to a
+	// JSON policy file or an inline policy object.
+	Policy PolicyConfig `json:"policy"`
 }
 
 // Duration is a time.Duration that unmarshals from a Go duration string such
@@ -157,6 +161,63 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	}
 	*d = Duration(parsed)
 	return nil
+}
+
+// PolicyConfig holds a global permission policy configured in config.json as
+// either a file path string or an inline policy.Policy object.
+type PolicyConfig struct {
+	Path      string
+	Inline    policy.Policy
+	InlineSet bool
+}
+
+func (p *PolicyConfig) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*p = PolicyConfig{}
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var path string
+		if err := json.Unmarshal(trimmed, &path); err != nil {
+			return err
+		}
+		if strings.TrimSpace(path) == "" {
+			return errors.New("policy path must not be empty")
+		}
+		*p = PolicyConfig{Path: path}
+		return nil
+	}
+	if trimmed[0] == '{' {
+		parsed, err := policy.Parse("policy", trimmed)
+		if err != nil {
+			return err
+		}
+		*p = PolicyConfig{Inline: parsed, InlineSet: true}
+		return nil
+	}
+	return errors.New("policy must be a file path string or a JSON object")
+}
+
+// LoadPolicy resolves the global permission policy for c: the policy configured
+// in config.json (inline or file path), or <home>/policy.json if it exists.
+// When neither is configured, LoadPolicy returns an empty policy and nil error.
+func (c Config) LoadPolicy() (policy.Policy, error) {
+	if c.Policy.Path != "" {
+		return policy.LoadFile(c.Policy.Path)
+	}
+	if c.Policy.InlineSet || !c.Policy.Inline.IsEmpty() {
+		return c.Policy.Inline, nil
+	}
+	if c.Home == "" {
+		return policy.Policy{}, nil
+	}
+	defaultPath := filepath.Join(c.Home, "policy.json")
+	p, err := policy.LoadFile(defaultPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return policy.Policy{}, nil
+	}
+	return p, err
 }
 
 // Webhook configures run notifications. Secret is the single canonical
@@ -366,6 +427,9 @@ func parse(path string, data []byte, home string) (Config, error) {
 	}
 	cfg.SocketPath = resolvePath(home, cfg.SocketPath, "clb.sock")
 	cfg.WorktreeDir = resolvePath(home, cfg.WorktreeDir, "worktrees")
+	if cfg.Policy.Path != "" && !filepath.IsAbs(cfg.Policy.Path) {
+		cfg.Policy.Path = filepath.Join(home, cfg.Policy.Path)
+	}
 	if err := webhook.CheckHeaders(cfg.Webhook.Headers); err != nil {
 		return Config{}, fmt.Errorf("%s: webhook.headers: %w", path, err)
 	}
@@ -518,6 +582,11 @@ func validate(path string, cfg *Config) error {
 	}
 	if err := validateWebhook(path, &cfg.Webhook); err != nil {
 		return err
+	}
+	if cfg.Policy.Path != "" {
+		if _, err := policy.LoadFile(cfg.Policy.Path); err != nil {
+			return fmt.Errorf("%s: policy: %w", path, err)
+		}
 	}
 	if len(cfg.SocketPath) >= socketPathLimit {
 		return fmt.Errorf("%s: socketPath is %d bytes, which meets or exceeds the macOS limit of %d; set socketPath to a shorter path", path, len(cfg.SocketPath), socketPathLimit)

@@ -671,6 +671,94 @@ func TestPermissionGranularityE2E(t *testing.T) {
 	}
 }
 
+func TestAutoApprovalPolicyE2E(t *testing.T) {
+	bin := t.TempDir()
+	c := &clb{path: buildCLB(t, bin), home: shortTempDir(t)}
+	agentPath, err := fakeagenttest.Build(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := newReceiver(t)
+	writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
+		"agentPath": agentPath,
+		"webhook": map[string]any{
+			"url":    hooks.url,
+			"secret": secret,
+		},
+	})
+	writeJSON(t, filepath.Join(c.home, "policy.json"), map[string]any{
+		"allow": map[string]any{
+			"commands": []string{"rg *"},
+		},
+	})
+	startDaemon(t, c, t.TempDir())
+	repo := gitRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".clb"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(repo, ".clb", "policy.json"), map[string]any{
+		"allow": map[string]any{
+			"fetch": []string{"docs.example.com"},
+		},
+	})
+
+	// 1. User-level ~/.clb/policy.json + repo-level <repo>/.clb/policy.json auto-approve
+	// "rg pattern src" and "https://docs.example.com/guide", while compound command with &&
+	// asks the user via awaiting_permission.
+	globalRun := c.run(t, "launch", "--repo", repo, "[policy] global")
+	waiting := c.waitStatus(t, globalRun.ID, "awaiting_permission")
+	if waiting.PendingPermission == nil || waiting.PendingPermission.ID != "perm-3" {
+		t.Fatalf("pending = %+v, want perm-3", waiting.PendingPermission)
+	}
+	c.run(t, "deny", globalRun.ID)
+	done := c.waitStatus(t, globalRun.ID, "finished")
+	if done.Summary != "policy: allow,allow,deny" {
+		t.Fatalf("global summary = %q, want %q", done.Summary, "policy: allow,allow,deny")
+	}
+	hooks.wait(t, globalRun.ID, "finished", 1)
+	if asked := hooks.matching(globalRun.ID, "awaiting_permission"); len(asked) != 1 || asked[0].payload.Permission == nil || asked[0].payload.Permission.ID != "perm-3" {
+		t.Fatalf("awaiting_permission webhooks = %+v, want only perm-3", asked)
+	}
+
+	var answered []string
+	for _, e := range c.logs(t, globalRun.ID) {
+		if e.Type == "permission_answered" {
+			answered = append(answered, string(e.Data))
+		}
+	}
+	wantAnswered := []string{
+		`{"id":"perm-1","approved":true,"auto":true,"rule":"allow.commands:rg *"}`,
+		`{"id":"perm-2","approved":true,"auto":true,"rule":"allow.fetch:docs.example.com"}`,
+		`{"id":"perm-3","approved":false,"option":"reject_once","optionId":"reject-once"}`,
+	}
+	if !slices.Equal(answered, wantAnswered) {
+		t.Fatalf("permission_answered events = %v, want %v", answered, wantAnswered)
+	}
+
+	// 2. Per-run --policy overrides the user and repo policies (omitting docs.example.com).
+	perRunPolicy := filepath.Join(t.TempDir(), "per-run-policy.json")
+	writeJSON(t, perRunPolicy, map[string]any{
+		"allow": map[string]any{
+			"commands": []string{"rg *"},
+		},
+	})
+	overrideRun := c.run(t, "launch", "--repo", repo, "--policy", perRunPolicy, "[policy] override")
+	waitingFetch := c.waitStatus(t, overrideRun.ID, "awaiting_permission")
+	if waitingFetch.PendingPermission == nil || waitingFetch.PendingPermission.ID != "perm-2" {
+		t.Fatalf("override pending = %+v, want perm-2", waitingFetch.PendingPermission)
+	}
+	c.run(t, "deny", overrideRun.ID)
+	waitingChain := c.waitStatus(t, overrideRun.ID, "awaiting_permission")
+	if waitingChain.PendingPermission == nil || waitingChain.PendingPermission.ID != "perm-3" {
+		t.Fatalf("override second pending = %+v, want perm-3", waitingChain.PendingPermission)
+	}
+	c.run(t, "deny", overrideRun.ID)
+	overrideDone := c.waitStatus(t, overrideRun.ID, "finished")
+	if overrideDone.Summary != "policy: allow,deny,deny" {
+		t.Fatalf("override summary = %q, want %q", overrideDone.Summary, "policy: allow,deny,deny")
+	}
+}
+
 type clb struct {
 	path string
 	home string

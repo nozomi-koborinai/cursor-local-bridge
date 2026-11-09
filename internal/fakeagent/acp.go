@@ -213,6 +213,8 @@ func (a *fakeACP) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prompt
 		reply, err = a.askPermission(ctx, req.SessionId)
 	case scriptPermissions:
 		reply, err = a.askPermissions(ctx, req.SessionId)
+	case scriptPolicy:
+		reply, err = a.askPolicyPermissions(ctx, req.SessionId)
 	case scriptBackground:
 		reply, err = a.background(ctx, req.SessionId, c.Cwd)
 	case scriptTransport:
@@ -375,6 +377,65 @@ func (a *fakeACP) askPermissions(ctx context.Context, sid acp.SessionId) (string
 		return "", second.err
 	}
 	reply := fmt.Sprintf("permissions: call-1=%s call-2=%s", first.outcome, second.outcome)
+	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
+}
+
+func (a *fakeACP) askPolicyPermissions(ctx context.Context, sid acp.SessionId) (string, error) {
+	options := []acp.PermissionOption{
+		{OptionId: "allow-once", Name: "Allow once", Kind: acp.PermissionOptionKindAllowOnce},
+		{OptionId: "allow-always", Name: "Always allow", Kind: acp.PermissionOptionKindAllowAlways},
+		{OptionId: "reject-once", Name: "Reject", Kind: acp.PermissionOptionKindRejectOnce},
+	}
+	calls := []acp.ToolCallUpdate{
+		{
+			ToolCallId: "call-cmd",
+			Title:      acp.Ptr("Run simple command"),
+			Kind:       acp.Ptr(acp.ToolKindExecute),
+			Status:     acp.Ptr(acp.ToolCallStatusPending),
+			RawInput:   map[string]any{"command": "rg pattern src"},
+		},
+		{
+			ToolCallId: "call-fetch",
+			Title:      acp.Ptr("Fetch docs"),
+			Kind:       acp.Ptr(acp.ToolKindFetch),
+			Status:     acp.Ptr(acp.ToolCallStatusPending),
+			RawInput:   map[string]any{"url": "https://docs.example.com/guide"},
+		},
+		{
+			ToolCallId: "call-ask",
+			Title:      acp.Ptr("Run compound command"),
+			Kind:       acp.Ptr(acp.ToolKindExecute),
+			Status:     acp.Ptr(acp.ToolCallStatusPending),
+			RawInput:   map[string]any{"command": "cd /path/to/repo && rg pattern src"},
+		},
+	}
+	var outcomes []string
+	for _, tc := range calls {
+		resp, err := a.connection().RequestPermission(ctx, acp.RequestPermissionRequest{
+			SessionId: sid,
+			ToolCall:  tc,
+			Options:   options,
+		})
+		if err != nil {
+			return "", err
+		}
+		outcome := "cancelled"
+		if sel := resp.Outcome.Selected; sel != nil {
+			for _, o := range options {
+				if o.OptionId != sel.OptionId {
+					continue
+				}
+				switch o.Kind {
+				case acp.PermissionOptionKindAllowOnce, acp.PermissionOptionKindAllowAlways:
+					outcome = "allow"
+				case acp.PermissionOptionKindRejectOnce, acp.PermissionOptionKindRejectAlways:
+					outcome = "deny"
+				}
+			}
+		}
+		outcomes = append(outcomes, outcome)
+	}
+	reply := "policy: " + strings.Join(outcomes, ",")
 	return reply, a.update(ctx, sid, acp.UpdateAgentMessageText(reply))
 }
 
