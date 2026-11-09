@@ -38,8 +38,6 @@ var (
 	errAuthTimeout = errors.New("authenticate timed out")
 )
 
-// answerKind never names an "always" option: an answer covers one request,
-// and a standing rule would let the agent skip later approvals.
 var answerKind = map[bool]acpsdk.PermissionOptionKind{
 	true:  acpsdk.PermissionOptionKindAllowOnce,
 	false: acpsdk.PermissionOptionKindRejectOnce,
@@ -402,18 +400,37 @@ func (c client) RequestPermission(ctx context.Context, req acpsdk.RequestPermiss
 	}
 	ctx, cancel := c.s.bind(ctx)
 	defer cancel()
-	approve, err := c.s.sink.Permission(ctx, asked)
+	dec, err := backend.AskPermission(ctx, c.s.sink, asked)
 	if err != nil {
 		return cancelled, nil
 	}
-	for _, o := range req.Options {
-		if o.Kind == answerKind[approve] {
-			return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
-				Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: o.OptionId},
-			}}, nil
-		}
+	if id, ok := selectOption(req.Options, dec); ok {
+		return acpsdk.RequestPermissionResponse{Outcome: acpsdk.RequestPermissionOutcome{
+			Selected: &acpsdk.RequestPermissionOutcomeSelected{OptionId: id},
+		}}, nil
 	}
 	return cancelled, nil
+}
+
+func selectOption(options []acpsdk.PermissionOption, dec backend.PermissionDecision) (acpsdk.PermissionOptionId, bool) {
+	if dec.OptionID != "" {
+		for _, o := range options {
+			if string(o.OptionId) == dec.OptionID {
+				return o.OptionId, true
+			}
+		}
+		return "", false
+	}
+	want := acpsdk.PermissionOptionKind(dec.Option)
+	if want == "" {
+		want = answerKind[dec.Approved]
+	}
+	for _, o := range options {
+		if o.Kind == want {
+			return o.OptionId, true
+		}
+	}
+	return "", false
 }
 
 func permissionRequest(req acpsdk.RequestPermissionRequest) (backend.PermissionRequest, error) {

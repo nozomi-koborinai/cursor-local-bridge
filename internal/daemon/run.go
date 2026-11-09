@@ -47,6 +47,8 @@ type promptData struct {
 type permissionAnsweredData struct {
 	ID       string `json:"id"`
 	Approved bool   `json:"approved"`
+	Option   string `json:"option,omitempty"`
+	OptionID string `json:"optionId,omitempty"`
 }
 
 type permissionCancelledData struct {
@@ -65,8 +67,8 @@ type webhookData struct {
 }
 
 type permResult struct {
-	approve bool
-	err     error
+	decision backend.PermissionDecision
+	err      error
 }
 
 type permWait struct {
@@ -320,7 +322,12 @@ func transitionEvents(effects []lifecycle.Effect, next lifecycle.Run, changed bo
 			}
 			cancels = append(cancels, ev)
 		case lifecycle.AnswerPermission:
-			ev, err := newEvent(at, eventPermissionAnswered, permissionAnsweredData{ID: eff.ID, Approved: eff.Approve})
+			ev, err := newEvent(at, eventPermissionAnswered, permissionAnsweredData{
+				ID:       eff.ID,
+				Approved: eff.Approve,
+				Option:   eff.Option,
+				OptionID: eff.OptionID,
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -654,7 +661,7 @@ func (a *actor) permissionAsked(g *generation, req backend.PermissionRequest, w 
 	}
 	run, err := a.apply(lifecycle.PermissionRequested{Permission: p}, nil)
 	if err != nil || !hasPermission(run.Lifecycle, p.ID) {
-		sendResult(w.answer, permResult{approve: false})
+		sendResult(w.answer, permResult{decision: backend.PermissionDecision{Approved: false, Option: backend.OptionRejectOnce}})
 		return
 	}
 	if w.claim(p.ID) {
@@ -688,7 +695,19 @@ func (a *actor) answerPermission(eff lifecycle.AnswerPermission) {
 		return
 	}
 	if ch, ok := a.gen.answers[eff.ID]; ok {
-		sendResult(ch, permResult{approve: eff.Approve})
+		opt := eff.Option
+		if opt == "" {
+			if eff.Approve {
+				opt = backend.OptionAllowOnce
+			} else {
+				opt = backend.OptionRejectOnce
+			}
+		}
+		sendResult(ch, permResult{decision: backend.PermissionDecision{
+			Approved: eff.Approve,
+			Option:   opt,
+			OptionID: eff.OptionID,
+		}})
 		delete(a.gen.answers, eff.ID)
 	}
 }
@@ -946,22 +965,27 @@ var (
 )
 
 func (s sink) Permission(ctx context.Context, req backend.PermissionRequest) (bool, error) {
+	dec, err := s.PermissionDecision(ctx, req)
+	return dec.Approved, err
+}
+
+func (s sink) PermissionDecision(ctx context.Context, req backend.PermissionRequest) (backend.PermissionDecision, error) {
 	w := &permWait{answer: make(chan permResult, 1)}
 	if !s.a.postFrom(s.g, func() { s.a.permissionAsked(s.g, req, w) }) {
-		return false, errSessionClosed
+		return backend.PermissionDecision{}, errSessionClosed
 	}
 	select {
 	case res := <-w.answer:
-		return res.approve, res.err
+		return res.decision, res.err
 	case <-ctx.Done():
 		if id, ok := w.withdraw(); ok {
 			s.a.postFrom(s.g, func() {
 				s.a.record(lifecycle.PermissionCancelled{ID: id, Reason: lifecycle.CancelWithdrawn}, nil)
 			})
 		}
-		return false, ctx.Err()
+		return backend.PermissionDecision{}, ctx.Err()
 	case <-s.g.ctx.Done():
-		return false, errSessionClosed
+		return backend.PermissionDecision{}, errSessionClosed
 	}
 }
 

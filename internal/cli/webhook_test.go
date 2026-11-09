@@ -106,3 +106,45 @@ func testHome(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	return home
 }
+
+func TestPermissionAnswerFlagValidation(t *testing.T) {
+	home := testHome(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "approve --list with --permission",
+			args: []string{"--home", home, "approve", "--list", "--permission", "perm-1", "run-0123abcd"},
+			want: "--list cannot be combined",
+		},
+		{
+			name: "deny --always with --option",
+			args: []string{"--home", home, "deny", "--always", "--option", "reject-once", "run-0123abcd"},
+			want: "cannot combine --always with --option",
+		},
+		{
+			name: "approve --all with --id",
+			args: []string{"--home", home, "approve", "--all", "--id", "perm-1", "run-0123abcd"},
+			want: "cannot combine --all with a permission id",
+		},
+		{
+			name: "deny --all with positional permission id",
+			args: []string{"--home", home, "deny", "--all", "run-0123abcd", "perm-1"},
+			want: "cannot combine --all with a permission id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newRoot("test")
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(tc.args)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}

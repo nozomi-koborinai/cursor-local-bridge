@@ -124,7 +124,7 @@ Grok Bot (or any assistant that can run remote shell commands and receive a webh
       - clb is the route I set up for work in my local repositories when cloud agents are not available. When I ask for work in a local repository, use clb through the remote shell. Do not refuse, and do not switch to a cloud agent.
       - Start a run with `clb launch --repo <path> "<prompt>"`. It prints the run as JSON. Keep its "id".
       - Check a run with `clb status <id>`, and read its events with `clb logs <id>`. If a command can time out, poll `clb status` instead of `clb logs --follow`.
-      - If "status" is "awaiting_permission", show me "pendingPermission". Run `clb approve <id>` or `clb deny <id>` only with my answer.
+      - If "status" is "awaiting_permission", show me "pendingPermissions" (or run `clb permissions <id>`). Run `clb approve <id> --permission <perm-id>` or `clb deny <id> --permission <perm-id>` (with `--option allow-once`, `--option allow-always`, or `--option reject`, or `--all` when answering every pending permission) only with my answer.
       - Send more instructions with `clb followup <id> "<prompt>"` (this also resumes a `finished` or `failed` run on its existing worktree). End a run with `clb stop <id>`. The branch clb/<id> keeps the agent's work.
       - `clb list` prints every run. Each command prints JSON, and an error starts with "clb:".
       - Do not push, merge, or open a pull request unless I ask.
@@ -158,7 +158,7 @@ Grok Bot (or any assistant that can run remote shell commands and receive a webh
 | `launch` | | Creates a run in `queued`. |
 | `followup` | `queued`, `running`, `awaiting_permission` | Queues the prompt for when the current turn ends. |
 | `followup` | `finished`, `failed` | Resumes an unstopped run in a new agent process on the same worktree (reloading `sessionId` when set, or starting a new session if the first start failed) and moves the run to `queued`. |
-| `approve`, `deny` | `awaiting_permission` | Answers the oldest pending permission request. |
+| `approve`, `deny` | `awaiting_permission` | Answers the oldest pending permission request, the specific request(s) named by `--permission` / `--id`, or every pending request with `--all`. |
 | `stop` | any | Stops the agent, commits uncommitted changes (including untracked files, excluding ignored files, skipping hooks and signing, falling back to author `clb <clb@localhost>`) to the run's branch, removes the worktree, and moves the run to `stopped`. If cleanup fails, the worktree stays and the run moves to `failed` (`error` starts with `remove worktree: `). Stopping a `failed` run retries cleanup while keeping `failed`. |
 
 A command in a disallowed state fails with a `conflict` error. The webhook fires each time a run enters `finished`, `failed`, or `stopped`.
@@ -178,7 +178,9 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 | `clb status ID` | The run. |
 | `clb list` | An array of all runs, newest first. |
 | `clb followup ID PROMPT` | The run. |
-| `clb approve ID`, `clb deny ID` | The run. |
+| `clb permissions ID` | An array of the run's pending permission requests, oldest first. |
+| `clb approve [--permission PERM_ID \| --id PERM_ID \| --all] [--option OPTION \| --always] [--list] ID [PERM_ID]` | The run (or the pending permissions array with `--list`). |
+| `clb deny [--permission PERM_ID \| --id PERM_ID \| --all] [--option OPTION \| --always] [--list] ID [PERM_ID]` | The run (or the pending permissions array with `--list`). |
 | `clb stop ID` | The run after removing its worktree, or an error with exit code 1 if cleanup fails. |
 | `clb logs [--follow] ID` | The run's events as NDJSON. `--follow` streams until the run is no longer active. |
 | `clb webhook setup [--test]` | `config`, `webhookHost`, `secret` (masked as `********`), `secretCreated`, and (with `--test`) `test.httpStatus`. |
@@ -229,11 +231,11 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Errors
 
 </details>
 
-- Empty fields (`summary`, `error`, `model`, `pendingPermission`) are omitted.
+- Empty fields (`summary`, `error`, `model`, `pendingPermission`, `pendingPermissions`) are omitted.
 - `model` is the model and effort requested for the run (from `clb launch --model`, `model` in `config.json`, the ACP session's parameterized config options, or `selectedModel` and `modelParameters` in `~/.cursor/cli-config.json`).
 - `summary` holds only the final assistant message from the run's most recent turn (or the last completed assistant message if the turn ended after a tool call with no further reply). Intermediate narration before tool calls and messages from earlier turns stay out of `summary`; run `clb logs <id>` to read the full multi-turn transcript.
 - `error` says why the run failed, including up to the first 512 bytes of agent stderr.
-- `pendingPermission` is the oldest unanswered permission request. `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. `clb approve` selects the option with `kind: "allow_once"` and `clb deny` selects `kind: "reject_once"` (or cancels if neither is offered).
+- `pendingPermission` is the oldest unanswered permission request, and `pendingPermissions` lists every unanswered request in FIFO order (also printed by `clb permissions <id>` or `clb approve --list <id>`). `toolCallId`, `kind`, `command`, and `url` come from the agent's tool call. `url` is omitted when the tool has no URL. By default `clb approve` selects `allow_once` and `clb deny` selects `reject_once` (or cancels if neither is offered). Pass `--permission <perm-id>` (or `--id <perm-id>`) to target a specific pending permission, `--all` to answer every pending permission, and `--option allow-once`, `--option allow-always` (or `--always`), `--option reject`, or an exact `optionId` from `options` to pick the decision.
 
 ### Events
 
@@ -375,7 +377,7 @@ The daemon logs to `~/.clb/daemon.log` and includes `~/.local/bin` on `PATH`. If
 ## Security
 
 - The daemon creates `~/.clb` and subdirectories with mode `0700`, database and log files with mode `0600`, and `clb.sock` with mode `0600` while verifying peer credentials match your user.
-- `clb` never passes `--force` or `--yolo` to the Cursor CLI, and only selects single-use permission options (`allow_once` or `reject_once`, never `allow_always`).
+- `clb` never passes `--force` or `--yolo` to the Cursor CLI, and defaults to single-use permission options (`allow_once` or `reject_once`) unless you explicitly request `allow-always` (`--option allow-always` or `--always`).
 - Whether the CLI asks before running a tool depends on the CLI's own settings—by default it can edit files without asking. To block specific tools or paths, configure `permissions.deny` in `~/.cursor/cli-config.json` or `.cursor/cli.json` (see Cursor CLI [Permissions](https://cursor.com/docs/cli/reference/permissions)).
 - An agent runs with your user's privileges in its worktree, and `clb` ends any of your processes whose working directory is inside that worktree when the agent closes. Review the run's branch before merging.
 

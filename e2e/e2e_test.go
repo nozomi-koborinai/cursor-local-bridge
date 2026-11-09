@@ -423,6 +423,75 @@ func TestStallWatchdogAndResume(t *testing.T) {
 	checkSigned(t, hooks.wait(t, launched.ID, "finished", 1)[0])
 }
 
+func TestPermissionGranularityE2E(t *testing.T) {
+	bin := t.TempDir()
+	c := &clb{path: buildCLB(t, bin), home: shortTempDir(t)}
+	agentPath, err := fakeagenttest.Build(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(c.home, "config.json"), map[string]any{
+		"agentPath": agentPath,
+	})
+	startDaemon(t, c, t.TempDir())
+	repo := gitRepo(t)
+
+	multi := c.run(t, "launch", "--repo", repo, "[permissions] check")
+	var waiting ipc.Run
+	eventually(t, "two simultaneous pending permissions", func() bool {
+		waiting = c.run(t, "status", multi.ID)
+		return len(waiting.PendingPermissions) == 2
+	})
+	if waiting.PendingPermission == nil || waiting.PendingPermission.ID != "perm-1" {
+		t.Fatalf("pendingPermission = %+v", waiting.PendingPermission)
+	}
+
+	var listed []ipc.Permission
+	decode(t, c.output(t, "", "permissions", multi.ID), &listed)
+	if len(listed) != 2 || listed[0].ID != "perm-1" || listed[1].ID != "perm-2" {
+		t.Fatalf("clb permissions = %+v", listed)
+	}
+	var listedViaApprove []ipc.Permission
+	decode(t, c.output(t, "", "approve", "--list", multi.ID), &listedViaApprove)
+	if len(listedViaApprove) != 2 || listedViaApprove[0].ID != "perm-1" || listedViaApprove[1].ID != "perm-2" {
+		t.Fatalf("clb approve --list = %+v", listedViaApprove)
+	}
+
+	afterPerm2 := c.run(t, "approve", "--permission", "perm-2", "--option", "allow-always", multi.ID)
+	if afterPerm2.Status != "awaiting_permission" || len(afterPerm2.PendingPermissions) != 1 || afterPerm2.PendingPermission.ID != "perm-1" {
+		t.Fatalf("after approving perm-2 = %+v", afterPerm2)
+	}
+
+	afterPerm1 := c.run(t, "approve", "--id", "perm-1", "--option", "reject", multi.ID)
+	if afterPerm1.Status != "running" || len(afterPerm1.PendingPermissions) != 0 {
+		t.Fatalf("after rejecting perm-1 = %+v", afterPerm1)
+	}
+	doneMulti := c.waitStatus(t, multi.ID, "finished")
+	if want := "permissions: call-1=reject-once call-2=allow-always"; doneMulti.Summary != want {
+		t.Fatalf("summary = %q, want %q", doneMulti.Summary, want)
+	}
+
+	denyAll := c.run(t, "launch", "--repo", repo, "[permissions] deny all")
+	eventually(t, "two pending permissions for deny --all", func() bool {
+		return len(c.run(t, "status", denyAll.ID).PendingPermissions) == 2
+	})
+	c.run(t, "deny", "--all", denyAll.ID)
+	doneDenyAll := c.waitStatus(t, denyAll.ID, "finished")
+	if want := "permissions: call-1=reject-once call-2=reject-once"; doneDenyAll.Summary != want {
+		t.Fatalf("deny --all summary = %q, want %q", doneDenyAll.Summary, want)
+	}
+
+	approveAll := c.run(t, "launch", "--repo", repo, "[permissions] approve all always")
+	eventually(t, "two pending permissions for approve --all --always", func() bool {
+		return len(c.run(t, "status", approveAll.ID).PendingPermissions) == 2
+	})
+	c.run(t, "approve", "--all", "--always", approveAll.ID)
+	doneApproveAll := c.waitStatus(t, approveAll.ID, "finished")
+	if want := "permissions: call-1=allow-always call-2=allow-always"; doneApproveAll.Summary != want {
+		t.Fatalf("approve --all --always summary = %q, want %q", doneApproveAll.Summary, want)
+	}
+}
+
 type clb struct {
 	path string
 	home string

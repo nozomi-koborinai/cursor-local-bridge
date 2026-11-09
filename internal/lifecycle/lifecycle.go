@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // State is the externally visible status of a run.
@@ -49,6 +51,30 @@ const (
 	CancelRunEnded   CancelReason = "run_ended"
 )
 
+type PermissionOption string
+
+const (
+	OptionAllowOnce    PermissionOption = "allow_once"
+	OptionAllowAlways  PermissionOption = "allow_always"
+	OptionRejectOnce   PermissionOption = "reject_once"
+	OptionRejectAlways PermissionOption = "reject_always"
+)
+
+func ParsePermissionOption(s string) (opt PermissionOption, allow, ok bool) {
+	norm := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "-", "_")
+	switch norm {
+	case "allow_once", "once":
+		return OptionAllowOnce, true, true
+	case "allow_always", "always":
+		return OptionAllowAlways, true, true
+	case "reject_once", "reject", "deny":
+		return OptionRejectOnce, false, true
+	case "reject_always":
+		return OptionRejectAlways, false, true
+	}
+	return "", false, false
+}
+
 // Permission is a tool call the agent wants to run and is waiting on.
 type Permission struct {
 	ID         string          `json:"id"`
@@ -88,8 +114,16 @@ type TurnEnded struct{}
 // PermissionRequested reports that the agent is blocked on a permission.
 type PermissionRequested struct{ Permission Permission }
 
-// PermissionAnswered approves or denies the oldest pending permission.
-type PermissionAnswered struct{ Approve bool }
+// PermissionAnswered answers one or more pending permissions on a run. When
+// PermissionID and PermissionIDs are empty and All is false, it answers the
+// oldest pending permission.
+type PermissionAnswered struct {
+	Approve       bool
+	Option        string
+	PermissionID  string
+	PermissionIDs []string
+	All           bool
+}
 
 // PermissionCancelled reports that the agent withdrew or cancelled the
 // permission request with ID (for example via $/cancel_request or stream cancel).
@@ -135,8 +169,10 @@ type SendPrompt struct{ Prompt string }
 
 // AnswerPermission unblocks the agent's permission request with ID.
 type AnswerPermission struct {
-	ID      string
-	Approve bool
+	ID       string
+	Approve  bool
+	Option   string
+	OptionID string
 }
 
 // CancelPermission unblocks a pending permission request as cancelled and
@@ -237,15 +273,7 @@ func Apply(r Run, e Event) (Run, []Effect, error) {
 		return r, []Effect{CancelPermission{ID: e.ID, Reason: e.Reason}}, nil
 
 	case PermissionAnswered:
-		if r.State != AwaitingPermission {
-			return r, nil, notAllowed("answer a permission for", r.State)
-		}
-		head := r.Permissions[0]
-		r.Permissions = clone(r.Permissions[1:])
-		if len(r.Permissions) == 0 {
-			r.State = Running
-		}
-		return r, []Effect{AnswerPermission{ID: head.ID, Approve: e.Approve}}, nil
+		return answerPermissions(r, e)
 
 	case FollowUp:
 		switch r.State {
@@ -348,6 +376,127 @@ func withoutPermission(perms []Permission, id string) ([]Permission, bool) {
 		return nil, true
 	}
 	return next, true
+}
+
+type offeredOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}
+
+func answerPermissions(r Run, e PermissionAnswered) (Run, []Effect, error) {
+	if r.State != AwaitingPermission {
+		return r, nil, notAllowed("answer a permission for", r.State)
+	}
+	ids := targetPermissionIDs(e.PermissionID, e.PermissionIDs)
+	if e.All && len(ids) > 0 {
+		return r, nil, fmt.Errorf("%w: cannot combine --all with a permission id", ErrNotAllowed)
+	}
+	var targets []Permission
+	switch {
+	case e.All:
+		targets = r.Permissions
+	case len(ids) == 0:
+		targets = r.Permissions[:1]
+	default:
+		for _, id := range ids {
+			if !slices.ContainsFunc(r.Permissions, func(p Permission) bool { return p.ID == id }) {
+				return r, nil, fmt.Errorf("%w: permission %q is not pending", ErrNotAllowed, id)
+			}
+		}
+		for _, p := range r.Permissions {
+			if slices.Contains(ids, p.ID) {
+				targets = append(targets, p)
+			}
+		}
+	}
+	rawOption := strings.TrimSpace(e.Option)
+	effects := make([]Effect, 0, len(targets))
+	for _, p := range targets {
+		ans, err := resolvePermissionAnswer(p, e.Approve, rawOption)
+		if err != nil {
+			return r, nil, err
+		}
+		effects = append(effects, ans)
+	}
+	nextPerms := clone(r.Permissions)
+	for _, p := range targets {
+		nextPerms, _ = withoutPermission(nextPerms, p.ID)
+	}
+	r.Permissions = nextPerms
+	if len(r.Permissions) == 0 {
+		r.State = Running
+	}
+	return r, effects, nil
+}
+
+func targetPermissionIDs(single string, many []string) []string {
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id != "" && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	add(single)
+	for _, id := range many {
+		add(id)
+	}
+	return out
+}
+
+func resolvePermissionAnswer(p Permission, approve bool, rawOption string) (AnswerPermission, error) {
+	var offered []offeredOption
+	if len(p.Options) > 0 {
+		if err := json.Unmarshal(p.Options, &offered); err != nil {
+			return AnswerPermission{}, fmt.Errorf("%w: invalid options on permission %q", ErrNotAllowed, p.ID)
+		}
+	}
+	if rawOption == "" {
+		wantKind := string(OptionRejectOnce)
+		if approve {
+			wantKind = string(OptionAllowOnce)
+		}
+		for _, o := range offered {
+			if o.Kind == wantKind {
+				return AnswerPermission{ID: p.ID, Approve: approve, Option: o.Kind, OptionID: o.OptionID}, nil
+			}
+		}
+		return AnswerPermission{ID: p.ID, Approve: approve}, nil
+	}
+
+	kind, allow, knownKind := ParsePermissionOption(rawOption)
+	if !approve && knownKind && allow {
+		return AnswerPermission{}, fmt.Errorf("%w: cannot deny with option %q", ErrNotAllowed, rawOption)
+	}
+	if len(offered) == 0 {
+		if !knownKind {
+			return AnswerPermission{}, fmt.Errorf("%w: unknown permission option %q", ErrNotAllowed, rawOption)
+		}
+		return AnswerPermission{ID: p.ID, Approve: allow, Option: string(kind)}, nil
+	}
+	if knownKind {
+		for _, o := range offered {
+			if o.Kind == string(kind) {
+				return AnswerPermission{ID: p.ID, Approve: allow, Option: o.Kind, OptionID: o.OptionID}, nil
+			}
+		}
+		return AnswerPermission{}, fmt.Errorf("%w: permission %q does not offer option %q", ErrNotAllowed, p.ID, rawOption)
+	}
+	for _, o := range offered {
+		if o.OptionID == rawOption {
+			optKind, optAllow, ok := ParsePermissionOption(o.Kind)
+			if !ok {
+				optKind = PermissionOption(o.Kind)
+				optAllow = approve
+			}
+			if !approve && optAllow {
+				return AnswerPermission{}, fmt.Errorf("%w: cannot deny with option %q", ErrNotAllowed, rawOption)
+			}
+			return AnswerPermission{ID: p.ID, Approve: optAllow, Option: string(optKind), OptionID: o.OptionID}, nil
+		}
+	}
+	return AnswerPermission{}, fmt.Errorf("%w: permission %q does not offer option %q", ErrNotAllowed, p.ID, rawOption)
 }
 
 func notAllowed(action string, s State) error {
