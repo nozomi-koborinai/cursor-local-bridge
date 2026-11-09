@@ -437,6 +437,38 @@ func assertRun(t *testing.T, got, want Run) {
 	}
 }
 
+func TestRunWithoutWorktree(t *testing.T) {
+	plain := Run{Repo: "/path/to/repo"}
+	if plain.HasWorktree() || plain.Dir() != plain.Repo {
+		t.Fatalf("plain dir = %q, has worktree %v", plain.Dir(), plain.HasWorktree())
+	}
+	with := Run{Repo: "/path/to/repo", Worktree: "/path/to/wt"}
+	if !with.HasWorktree() || with.Dir() != with.Worktree {
+		t.Fatalf("worktree dir = %q, has worktree %v", with.Dir(), with.HasWorktree())
+	}
+
+	s := openStore(t)
+	now := time.Now().UTC()
+	in := Run{
+		ID:        "run-plain",
+		Repo:      "/path/to/repo",
+		Backend:   backend.ACP,
+		Lifecycle: lifecycle.Run{State: lifecycle.Finished},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.CreateRun(t.Context(), in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetRun(t.Context(), in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repo != in.Repo || got.BaseRef != "" || got.Branch != "" || got.Worktree != "" || got.HasWorktree() || got.Dir() != in.Repo {
+		t.Fatalf("stored = %+v", got)
+	}
+}
+
 func assertEvent(t *testing.T, got, want Event) {
 	t.Helper()
 	if !got.Time.Equal(want.Time) {

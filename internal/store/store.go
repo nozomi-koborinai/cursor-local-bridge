@@ -27,10 +27,13 @@ var migrationFS embed.FS
 type RunID string
 
 type Run struct {
-	ID        RunID
-	Repo      string
-	BaseRef   string
-	Branch    string
+	ID      RunID
+	Repo    string
+	BaseRef string
+	Branch  string
+	// Worktree is the git worktree clb created for this run. It is empty when
+	// the run was launched in Repo directly. Cleanup must not delete Repo, or
+	// end processes there, in that case.
 	Worktree  string
 	Backend   backend.Kind
 	Model     string
@@ -44,6 +47,19 @@ type Run struct {
 	Lifecycle lifecycle.Run
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// Dir is the directory the agent runs in.
+func (r Run) Dir() string {
+	if r.HasWorktree() {
+		return r.Worktree
+	}
+	return r.Repo
+}
+
+// HasWorktree reports whether the run has a git worktree.
+func (r Run) HasWorktree() bool {
+	return r.Worktree != ""
 }
 
 // Event is one entry of a run's event log. Seq starts at 1 for each run.
