@@ -81,6 +81,7 @@ const (
 	scriptEcho script = iota
 	scriptPermission
 	scriptPermissions
+	scriptPolicy
 	scriptSlow
 	scriptStall
 	scriptCrash
@@ -99,6 +100,8 @@ func scriptFor(prompt string) script {
 		return scriptSlow
 	case strings.Contains(prompt, "[permissions]"):
 		return scriptPermissions
+	case strings.Contains(prompt, "[policy]"):
+		return scriptPolicy
 	case strings.Contains(prompt, "[permission]"):
 		return scriptPermission
 	case strings.Contains(prompt, "[background]"):

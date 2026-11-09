@@ -36,6 +36,7 @@ type Run struct {
 	Worktree  string
 	Backend   backend.Kind
 	Model     string
+	Policy    string
 	SessionID string
 	// AgentVersion is the CLI version of the run's most recent agent
 	// process, or "" when that process's version probe failed or no process
@@ -76,7 +77,7 @@ type Store struct {
 	db *sql.DB
 }
 
-const runColumns = `id, repo, base_ref, branch, worktree, backend, model, session_id, agent_version, state, prompts, permissions, error, stopped, summary, created_at, updated_at`
+const runColumns = `id, repo, base_ref, branch, worktree, backend, model, policy, session_id, agent_version, state, prompts, permissions, error, stopped, summary, created_at, updated_at`
 
 // Open opens or creates the database at path and applies pending migrations.
 func Open(path string) (*Store, error) {
@@ -112,8 +113,8 @@ func (s *Store) CreateRun(ctx context.Context, r Run) error {
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO runs (`+runColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.SessionID, r.AgentVersion,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.Policy, r.SessionID, r.AgentVersion,
 		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Lifecycle.Stopped, r.Summary,
 		row.created, row.updated,
 	)
@@ -176,11 +177,11 @@ func (s *Store) UpdateRun(ctx context.Context, r Run, events ...NewEvent) ([]Eve
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET
-			repo = ?, base_ref = ?, branch = ?, worktree = ?, backend = ?, model = ?, session_id = ?,
+			repo = ?, base_ref = ?, branch = ?, worktree = ?, backend = ?, model = ?, policy = ?, session_id = ?,
 			agent_version = ?,
 			state = ?, prompts = ?, permissions = ?, error = ?, stopped = ?, summary = ?, updated_at = ?
 		WHERE id = ?`,
-		r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.SessionID, r.AgentVersion,
+		r.Repo, r.BaseRef, r.Branch, r.Worktree, string(r.Backend), r.Model, r.Policy, r.SessionID, r.AgentVersion,
 		string(r.Lifecycle.State), row.prompts, row.permissions, r.Lifecycle.Error, r.Lifecycle.Stopped, r.Summary,
 		row.updated, r.ID,
 	)
@@ -404,7 +405,7 @@ func scanRun(sc rowScanner) (Run, error) {
 	)
 	err := sc.Scan(
 		&r.ID, &r.Repo, &r.BaseRef, &r.Branch, &r.Worktree,
-		&backendText, &r.Model, &r.SessionID, &r.AgentVersion, &stateText,
+		&backendText, &r.Model, &r.Policy, &r.SessionID, &r.AgentVersion, &stateText,
 		&prompts, &permissions, &r.Lifecycle.Error, &r.Lifecycle.Stopped, &r.Summary,
 		&created, &updated,
 	)

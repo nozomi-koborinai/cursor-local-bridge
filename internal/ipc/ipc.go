@@ -33,6 +33,7 @@ type Request struct {
 	Ref     string `json:"ref,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Backend string `json:"backend,omitempty"`
+	Policy  string `json:"policy,omitempty"`
 	// Follow keeps a logs call open until the run is no longer active.
 	Follow     bool `json:"follow,omitempty"`
 	NoWorktree bool `json:"noWorktree,omitempty"`
@@ -100,6 +101,7 @@ type Run struct {
 	Worktree           string       `json:"worktree,omitempty"`
 	Backend            string       `json:"backend"`
 	Model              string       `json:"model,omitempty"`
+	Policy             string       `json:"policy,omitempty"`
 	SessionID          string       `json:"sessionId,omitempty"`
 	AgentVersion       string       `json:"agentVersion,omitempty"`
 	Summary            string       `json:"summary,omitempty"`

@@ -28,6 +28,7 @@ func TestRunRoundTrip(t *testing.T) {
 		Worktree:     "/wt/run-1",
 		Backend:      backend.ACP,
 		Model:        "composer",
+		Policy:       "/path/to/policy.json",
 		SessionID:    "sess-1",
 		AgentVersion: "2026.01.01-fake",
 		Summary:      "did the thing",
@@ -63,6 +64,7 @@ func TestRunRoundTrip(t *testing.T) {
 	in.Worktree = "/wt/run-1b"
 	in.Backend = backend.Print
 	in.Model = "other"
+	in.Policy = "/path/to/other-policy.json"
 	in.SessionID = "sess-2"
 	in.AgentVersion = "2026.01.08-abcdef0"
 	in.Summary = "next"
@@ -161,7 +163,7 @@ func TestMigrationAddsAgentVersion(t *testing.T) {
 		t.Fatalf("agent version = %q", got.AgentVersion)
 	}
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("user_version = %d, %v", version, err)
 	}
 }
@@ -238,7 +240,7 @@ func TestEventsSeqFilterAndReopen(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != 4 {
 		t.Fatalf("user_version = %d", version)
 	}
 	got, err = s.Events(ctx, "run-a", 0)

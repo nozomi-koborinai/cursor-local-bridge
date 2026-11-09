@@ -175,7 +175,7 @@ func newSender(w config.Webhook) *webhook.Sender {
 }
 
 func (a *app) launchCmd() *cobra.Command {
-	var repo string
+	var repo, policyPath string
 	req := ipc.Request{Method: ipc.MethodLaunch}
 	cmd := &cobra.Command{
 		Use:   "launch [flags] PROMPT",
@@ -192,6 +192,11 @@ func (a *app) launchCmd() *cobra.Command {
 		if req.Repo, err = filepath.Abs(repo); err != nil {
 			return err
 		}
+		if policyPath != "" {
+			if req.Policy, err = filepath.Abs(policyPath); err != nil {
+				return err
+			}
+		}
 		return a.printRun(cmd, req, *format)
 	}
 	cmd.Flags().StringVar(&repo, "repo", ".", "repository or directory to work in")
@@ -199,6 +204,7 @@ func (a *app) launchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&req.Ref, "ref", "", "commit, branch, or tag to start the run's branch from (default HEAD)")
 	cmd.Flags().StringVar(&req.Model, "model", "", "model for the agent (default from the config)")
 	cmd.Flags().StringVar(&req.Backend, "backend", "", "acp or print (default from the config)")
+	cmd.Flags().StringVar(&policyPath, "policy", "", "JSON permission policy file for this run")
 	return cmd
 }
 

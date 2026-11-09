@@ -14,7 +14,7 @@ Use it in environments where cloud agents are not available.
 - `clb launch` creates a run. The daemon adds a git worktree on a new branch `clb/<run id>`, starts `agent acp` in it, and sends your prompt over the [Agent Client Protocol](https://agentclientprotocol.com). `--no-worktree` starts the agent in the directory you name and does not create a worktree or a branch.
 - `clb clean` removes the worktrees and `clb/<id>` branches of runs that have finished, failed, or stopped. Runs that are still active stay. `clb gc` is the same command.
 - The daemon stores every run and its streamed events in SQLite (skipping noisy types listed in [Events](#events) and replayed history on session resume) and mirrors them to an NDJSON file you can `tail -f`.
-- When the Cursor CLI requests permission for a tool call, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny`. Whether the CLI asks before using a tool depends on the CLI's own settings; it can apply a file edit without asking. See [Security](#security).
+- When the Cursor CLI requests permission for a tool call, the run waits in `awaiting_permission` until you run `clb approve` or `clb deny` (unless an optional [auto-approval policy](#auto-approval-policy) answers it automatically). Whether the CLI asks before using a tool depends on the CLI's own settings; it can apply a file edit without asking. See [Security](#security).
 - When a run reaches `finished`, `failed`, or `stopped`, the daemon posts a signed webhook if configured via `clb webhook setup`.
 
 `clb` uses the login of the Cursor CLI on your machine (`agent login`). It does not need or accept an API key.
@@ -187,7 +187,7 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Pass `
 | Command | Prints |
 | --- | --- |
 | `clb daemon` | Runs the daemon in the foreground. |
-| `clb launch [--repo DIR] [--ref REF] [--no-worktree] [--model MODEL] [--backend acp\|print] [-o json\|text] PROMPT` | The new run. `--repo` defaults to `.`. `--ref` defaults to `HEAD`, must name a commit, and must not start with `-`. `--no-worktree` runs in `--repo` and creates no worktree and no branch. It rejects `--ref`. |
+| `clb launch [--repo DIR] [--ref REF] [--no-worktree] [--model MODEL] [--backend acp\|print] [--policy FILE] [-o json\|text] PROMPT` | The new run. `--repo` defaults to `.`. `--ref` defaults to `HEAD`, must name a commit, and must not start with `-`. `--no-worktree` runs in `--repo` and creates no worktree and no branch. It rejects `--ref`. `--policy` sets a per-run permission policy file (see [Auto-approval policy](#auto-approval-policy)). |
 | `clb status [-o json\|text] ID` | The run. |
 | `clb list [-o json\|text]` | Every run, newest first. `text` prints a table. |
 | `clb followup [-o json\|text] ID PROMPT` | The run. |
@@ -283,6 +283,7 @@ Every command except `daemon` and `logs` prints one JSON value on stdout. Pass `
 
 - `status`, `prompt`, `permission_requested`, `permission_answered`, `permission_cancelled`, `agent_process`, `stderr`, and `webhook` come from the daemon. `transport_error` is an agent message the daemon classified as a transport failure. Other types come from the agent (`acp` `sessionUpdate` values plus `turn_ended`, or `print` stream-json `type` values).
 - `permission_cancelled` records that a pending request was dropped. `reason` is `cancelled` when the agent withdrew the request, `superseded` when a newer request replaced it (`supersededBy` is the new id), `turn_ended`, or `run_ended`.
+- When an [auto-approval policy](#auto-approval-policy) answers a permission automatically, `permission_requested` and `permission_answered` are both logged (`{"id":"perm-1","approved":true,"auto":true,"rule":"allow.commands:rg"}`) without pausing the run in `awaiting_permission`.
 - `transport_error` keeps the original agent payload. A typical payload is an `agent_message_chunk`, or a print-mode `assistant` line, whose text is `RetriableError: http/2 stream closed`. That text is not added to `summary`. The event ends the current assistant message, so reply text after a retry replaces the partial text from before it.
 - `agent_process` is written when an agent process starts. `data` has `pid`, `command` (`acp`, `create-chat`, or `print`), and either `version` or `versionError`. In `print` mode each prompt is a new process, so an auto-update between prompts is two events with different versions.
 - `stderr` is one line of that process's stderr, with `pid` and `line`. A line longer than 4 KiB arrives in pieces cut at rune boundaries. After 1 MiB from one process, one event has `capped: true` and later lines from that process are dropped. `clb logs --type stderr ID` prints them, including with `--follow` while a run is still going.
@@ -407,8 +408,46 @@ When you load a file that has both and they differ, the bearer key replaces the 
 | `webhook.secret` | empty | Single webhook secret sent as `Authorization: Bearer <secret>` and used as the HMAC signing key for `X-Clb-Signature` (required when `webhook.url` is set; always masked as `********` when displayed). |
 | `webhook.headers` | empty | Extra HTTP headers sent on every delivery. A legacy `Authorization: Bearer <key>` value is read into `webhook.secret`. Any other `Authorization` value is sent as-is and overrides the bearer token. The next `clb webhook setup` removes `Authorization` from this object. |
 | `webhook.reminder` | empty | How long a pending permission waits before each `permissionReminder`. A Go duration such as `5m`. Empty sends no reminders. |
+| `policy` | `<home>/policy.json` if present | Optional permission [auto-approval policy](#auto-approval-policy), either a path to a JSON file or an inline policy object. Overridden per run by `clb launch --policy FILE`. |
 
 When `config.json` sets `webhook.secret` or `webhook.headers`, every `clb` command except `clb webhook setup` refuses to load it if group or other users have any permissions on the file; run `chmod 600 ~/.clb/config.json` to fix it.
+
+### Auto-approval policy
+
+By default, the allowlist is empty and every permission request from `agent acp` pauses the run in `awaiting_permission` until answered with `clb approve` or `clb deny`.
+
+You can configure an optional explicit allowlist policy so matching single commands and web fetches are automatically approved (`allow_once`), while anything not on the allowlist always asks the human:
+
+- **Per-run**: pass `clb launch --policy /path/to/policy.json PROMPT` (overrides user-level and repo-level policies for that run).
+- **Repo-level**: place `<repo>/.clb/policy.json` in the target repository (snapshotted at `clb launch` before the agent starts and merged with the user-level policy).
+- **User-level**: create `~/.clb/policy.json` (reloaded on each permission check) or set `"policy"` in `~/.clb/config.json` to a file path or inline object (setting `"policy": {}` disables `~/.clb/policy.json`).
+
+```json
+{
+  "allow": {
+    "commands": [
+      "pwd",
+      "git status",
+      "git diff *",
+      "git log *",
+      "rg:*",
+      "head *",
+      "go test ./..."
+    ],
+    "fetch": ["docs.example.com", "*.example.org", "https://api.example.net/v1/*"]
+  }
+}
+```
+
+Evaluation rules and safety guarantees:
+
+- **Explicit allowlist only (`DecisionAllow` vs `DecisionAsk`)**: Only requests that match an explicit `allow` rule are auto-approved (`allow_once`). Every other request falls through to `awaiting_permission` and fires `permissionRequested` so a human decides.
+- **Exact vs explicit prefix-wildcard command matching**:
+  - A rule without a trailing wildcard (such as `"pwd"`, `"git status"`, or `"go test ./..."`) matches **only** that exact `argv` token sequence (`["git", "status"]`, not `git status --short` or `git push`).
+  - A rule ending in ` *` or `:*` (such as `"git diff *"`, `"rg:*"`, or `"python3 -m unittest *"`) matches that token prefix followed by zero or more simple arguments. Bare `"*"` or `":*"` is rejected.
+- **No shell metasyntax**: A command is parsed as a single simple command. Any command containing pipelines or compound operators (`|`, `||`, `&&`, `;`, `&`, newlines), redirections (`>`, `>>`, `<`, `<<`, `<<<`, `>&`, `<&`, `<>`), command or variable expansions (`$()`, `` ` ``, `${}`, `$VAR`), subshells or brace groups (`()`, `{}`, `<()`, `>()`), unquoted globs or escapes (`*`, `?`, `[]`, `~`, `\`), leading environment variable assignments (`VAR=val cmd`), or shell evaluation/wrapper builtins (`eval`, `source`, `.`, `exec`, `command`, `builtin`, `sh`, `bash`, `zsh`, `env`, `sudo`, `timeout`, `xargs`, ...) is **never** auto-approved and always waits for human approval.
+- **Fetch patterns**: `allow.fetch` matches clean `http` and `https` URLs by exact host (`docs.example.com`), subdomain wildcard (`*.example.org`), host + path prefix, or full URL pattern (`https://api.example.net/v1/*`), rejecting TLD-only wildcards (`*.com`) and path traversal (`..`, `.`, `%2e`, `%25`, `%2f`).
+- **Audit trail**: Every automatic approval logs both `permission_requested` and `permission_answered` (`{"id":"perm-1","approved":true,"auto":true,"rule":"allow.commands:rg:*"}`) in `clb logs` and the run's NDJSON file.
 
 ## Backends
 
