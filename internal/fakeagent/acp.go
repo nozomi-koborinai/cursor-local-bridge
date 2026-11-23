@@ -494,6 +494,10 @@ func (a *fakeACP) CloseSession(context.Context, acp.CloseSessionRequest) (acp.Cl
 	return acp.CloseSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionClose)
 }
 
+func (a *fakeACP) DeleteSession(context.Context, acp.DeleteSessionRequest) (acp.DeleteSessionResponse, error) {
+	return acp.DeleteSessionResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionDelete)
+}
+
 func (a *fakeACP) ListSessions(context.Context, acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
 	return acp.ListSessionsResponse{}, acp.NewMethodNotFound(acp.AgentMethodSessionList)
 }
