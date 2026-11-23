@@ -353,7 +353,7 @@ type exited struct {
 
 func (e exited) Error() string { return fmt.Sprintf("agent acp exited (%v)", e.status) }
 
-func offersAuth(methods []acpsdk.AuthMethod, id string) bool {
+func offersAuth(methods []acpsdk.AuthMethod, id acpsdk.AuthMethodId) bool {
 	for _, m := range methods {
 		if m.Agent != nil && m.Agent.Id == id {
 			return true
@@ -512,6 +512,14 @@ func decodeObject(b []byte) map[string]any {
 		return nil
 	}
 	return fields
+}
+
+func (client) CompleteElicitation(context.Context, acpsdk.CompleteElicitationNotification) error {
+	return nil
+}
+
+func (client) CreateElicitation(context.Context, acpsdk.CreateElicitationRequest) (acpsdk.CreateElicitationResponse, error) {
+	return acpsdk.CreateElicitationResponse{}, acpsdk.NewMethodNotFound(acpsdk.ClientMethodElicitationCreate)
 }
 
 func (client) ReadTextFile(context.Context, acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {
